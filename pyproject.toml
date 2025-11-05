@@ -1,7 +1,7 @@
 [project]
-name = "comfyui-index-tts2"
+name = "comfyui-indextts2"
 description = "ComfyUI-Index-TTS2 is a custom node plugin for ComfyUI that packages the core functionality of IndexTTS2 (long-form, multi-speaker, multi-dialect podcast voice generation) into a visual workflow"
-version = "1.0.2"
+version = "1.0.3"
 license = { file = "LICENSE" }
 
 classifiers = [
