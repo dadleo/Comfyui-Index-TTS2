@@ -88,39 +88,48 @@ class AdvancedResampler:
 
 class IndexTTS2:
     def __init__(
-            self, cfg_path="checkpoints/config.yaml", model_dir="checkpoints", is_fp16=False, device=None,
-            use_cuda_kernel=None,
+            self, cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, device=None,
+            use_cuda_kernel=None, use_deepspeed=False, use_accel=False, use_torch_compile=False
     ):
         """
         Args:
             cfg_path (str): path to the config file.
             model_dir (str): path to the model directory.
-            is_fp16 (bool): whether to use fp16.
+            use_fp16 (bool): whether to use fp16.
             device (str): device to use (e.g., 'cuda:0', 'cpu'). If None, it will be set automatically based on the availability of CUDA or MPS.
             use_cuda_kernel (None | bool): whether to use BigVGan custom fused activation CUDA kernel, only for CUDA device.
+            use_deepspeed (bool): whether to use DeepSpeed or not.
+            use_accel (bool): whether to use acceleration engine for GPT2 or not.
+            use_torch_compile (bool): whether to use torch.compile for optimization or not.
         """
         if device is not None:
-            self.device = torch.device(device)
-            self.is_fp16 = False if device == "cpu" else is_fp16
+            self.device = device
+            self.use_fp16 = False if device == "cpu" else use_fp16
             self.use_cuda_kernel = use_cuda_kernel is not None and use_cuda_kernel and device.startswith("cuda")
         elif torch.cuda.is_available():
-            self.device = torch.device("cuda:0")
-            self.is_fp16 = is_fp16
+            self.device = "cuda:0"
+            self.use_fp16 = use_fp16
             self.use_cuda_kernel = use_cuda_kernel is None or use_cuda_kernel
+        elif hasattr(torch, "xpu") and torch.xpu.is_available():
+            self.device = "xpu"
+            self.use_fp16 = use_fp16
+            self.use_cuda_kernel = False
         elif hasattr(torch, "mps") and torch.backends.mps.is_available():
-            self.device = torch.device("mps")
-            self.is_fp16 = False  # Use float16 on MPS is overhead than float32
+            self.device = "mps"
+            self.use_fp16 = False  # Use float16 on MPS is overhead than float32
             self.use_cuda_kernel = False
         else:
-            self.device = torch.device("cpu")
-            self.is_fp16 = False
+            self.device = "cpu"
+            self.use_fp16 = False
             self.use_cuda_kernel = False
             print(">> Be patient, it may take a while to run in CPU mode.")
 
         self.cfg = OmegaConf.load(cfg_path)
         self.model_dir = model_dir
-        self.dtype = torch.float16 if self.is_fp16 else None
+        self.dtype = torch.float16 if self.use_fp16 else None
         self.stop_mel_token = self.cfg.gpt.stop_mel_token
+        self.use_accel = use_accel
+        self.use_torch_compile = use_torch_compile
 
         # ========== 系统性属性初始化 - 避免所有AttributeError ==========
         # 进度引用显示（可选）
@@ -226,36 +235,25 @@ class IndexTTS2:
             print("⚠️  Emotion analysis will be disabled")
             self.qwen_emo = None
 
-        self.gpt = UnifiedVoice(**self.cfg.gpt)
+        self.gpt = UnifiedVoice(**self.cfg.gpt, use_accel=self.use_accel)
         self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
         load_checkpoint(self.gpt, self.gpt_path)
         self.gpt = self.gpt.to(self.device)
-        if self.is_fp16:
+        if self.use_fp16:
             self.gpt.eval().half()
         else:
             self.gpt.eval()
         print(">> GPT weights restored from:", self.gpt_path)
-        # 使用兼容性模块检查DeepSpeed可用性
-        try:
-            from indextts.compat.deepspeed_compat import DEEPSPEED_AVAILABLE, check_deepspeed_availability
-            use_deepspeed, _ = check_deepspeed_availability()
-        except ImportError:
-            # 如果兼容性模块不可用，回退到原始检查
-            use_deepspeed = False
+
+        # DeepSpeed 支持
+        if use_deepspeed:
             try:
                 import deepspeed
-                if hasattr(deepspeed, 'init_inference'):
-                    use_deepspeed = True
-                    print(">> DeepSpeed可用，启用加速推理")
-                else:
-                    print(">> DeepSpeed模块不完整，使用标准PyTorch推理")
-            except (ImportError, OSError, CalledProcessError, FileNotFoundError, AttributeError, ModuleNotFoundError) as e:
+            except (ImportError, OSError, CalledProcessError) as e:
                 use_deepspeed = False
-                print(f">> DeepSpeed不可用，使用标准PyTorch推理: {e}")
-                if "deepspeed.utils.torch" in str(e):
-                    print(">> 检测到DeepSpeed版本兼容性问题，建议更新DeepSpeed或使用标准推理模式")
+                print(f">> Failed to load DeepSpeed. Falling back to normal inference. Error: {e}")
 
-        if self.is_fp16:
+        if self.use_fp16:
             self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=True)
         else:
             self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=False)
@@ -406,6 +404,10 @@ class IndexTTS2:
         )
         self.s2mel = s2mel.to(self.device)
         self.s2mel.models['cfm'].estimator.setup_caches(max_batch_size=1, max_seq_length=8192)
+        if self.use_torch_compile:
+            print(">> Enabling torch.compile optimization for S2Mel")
+            self.s2mel.enable_torch_compile()
+            print(">> torch.compile optimization enabled successfully")
         self.s2mel.eval()
         print(">> s2mel weights restored from:", s2mel_path)
 

@@ -379,7 +379,8 @@ class UnifiedVoice(nn.Module):
                  start_text_token=0, stop_text_token=1, number_mel_codes=8194, start_mel_token=8192, stop_mel_token=8193,
                  train_solo_embeddings=False, use_mel_codes_as_input=True,
                  checkpointing=True, types=1,
-                 condition_num_latent=32, condition_type="perceiver", condition_module=None, emo_condition_module=None):
+                 condition_num_latent=32, condition_type="perceiver", condition_module=None, emo_condition_module=None,
+                 use_accel=False):
         """
         Args:
             layers: Number of layers in transformer stack.
@@ -418,6 +419,7 @@ class UnifiedVoice(nn.Module):
         self.cond_num = condition_num_latent
         self.cond_mask_pad = nn.ConstantPad1d((self.cond_num, 0), True)
         self.emo_cond_mask_pad = nn.ConstantPad1d((1, 0), True)
+        self.use_accel = use_accel
         if condition_type == "perceiver":
             self.conditioning_encoder = ConditioningEncoder(1024, model_dim, num_attn_heads=heads)
             self.perceiver_encoder = PerceiverResampler(model_dim, dim_context=model_dim, num_latents=self.cond_num)
@@ -502,6 +504,18 @@ class UnifiedVoice(nn.Module):
             self.mel_head,
             kv_cache=kv_cache,
         )
+
+        # Apply acceleration if enabled
+        if self.use_accel:
+            try:
+                from indextts.accel import GPT2AccelModel
+                print(">> Enabling GPT2 acceleration engine")
+                self.inference_model = GPT2AccelModel(self.inference_model)
+                print(">> GPT2 acceleration engine enabled successfully")
+            except ImportError as e:
+                print(f">> Failed to load acceleration engine: {e}")
+                print(">> Falling back to standard inference")
+
         if use_deepspeed and torch.cuda.is_available():
             try:
                 import deepspeed
