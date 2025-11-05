@@ -379,7 +379,8 @@ class UnifiedVoice(nn.Module):
                  start_text_token=0, stop_text_token=1, number_mel_codes=8194, start_mel_token=8192, stop_mel_token=8193,
                  train_solo_embeddings=False, use_mel_codes_as_input=True,
                  checkpointing=True, types=1,
-                 condition_num_latent=32, condition_type="perceiver", condition_module=None, emo_condition_module=None):
+                 condition_num_latent=32, condition_type="perceiver", condition_module=None, emo_condition_module=None,
+                 use_accel=False):
         """
         Args:
             layers: Number of layers in transformer stack.
@@ -418,6 +419,8 @@ class UnifiedVoice(nn.Module):
         self.cond_num = condition_num_latent
         self.cond_mask_pad = nn.ConstantPad1d((self.cond_num, 0), True)
         self.emo_cond_mask_pad = nn.ConstantPad1d((1, 0), True)
+        self.use_accel = use_accel
+        self.accel_engine = None  # Will be initialized in post_init_gpt2_config
         if condition_type == "perceiver":
             self.conditioning_encoder = ConditioningEncoder(1024, model_dim, num_attn_heads=heads)
             self.perceiver_encoder = PerceiverResampler(model_dim, dim_context=model_dim, num_latents=self.cond_num)
@@ -493,6 +496,47 @@ class UnifiedVoice(nn.Module):
             gradient_checkpointing=False,
             use_cache=True,
         )
+        # Apply acceleration if enabled
+        if self.use_accel and torch.cuda.is_available():
+            try:
+                # Check if flash attention is available
+                import flash_attn
+                from indextts.accel import GPT2AccelModel, AccelInferenceEngine
+
+                print(">> Enabling GPT2 acceleration engine")
+
+                # Create accel model
+                accel_gpt = GPT2AccelModel(gpt_config)
+                accel_gpt.load_state_dict(self.gpt.state_dict(), strict=False)
+
+                if half:
+                    accel_gpt = accel_gpt.half().cuda()
+                else:
+                    accel_gpt = accel_gpt.cuda()
+                accel_gpt.eval()
+
+                # Create lm_head with norm
+                lm_head_with_norm = nn.Sequential(self.final_norm, self.mel_head)
+
+                # Create acceleration engine
+                self.accel_engine = AccelInferenceEngine(
+                    model=accel_gpt,
+                    lm_head=lm_head_with_norm,
+                    num_layers=self.layers,
+                    num_heads=self.heads,
+                    head_dim=self.model_dim // self.heads,
+                    block_size=256,
+                    num_blocks=16,  # Reduce to save memory (16*256 = 4096 tokens capacity)
+                    use_cuda_graph=True,
+                )
+                print(">> GPT2 acceleration engine initialized successfully")
+            except ImportError as e:
+                print(f">> Failed to load acceleration engine: {e}")
+                print(">> Falling back to standard inference")
+                self.accel_engine = None
+        else:
+            self.accel_engine = None
+
         self.inference_model = GPT2InferenceModel(
             gpt_config,
             self.gpt,
@@ -502,6 +546,7 @@ class UnifiedVoice(nn.Module):
             self.mel_head,
             kv_cache=kv_cache,
         )
+
         if use_deepspeed and torch.cuda.is_available():
             try:
                 import deepspeed
