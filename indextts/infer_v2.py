@@ -1124,9 +1124,19 @@ class IndexTTS2:
                 print(emo_dict)
                 emo_vector = list(emo_dict.values())
             else:
-                print("⚠️  Emotion model not available, using default emotion vector")
-                # 使用默认的情感向量
-                emo_vector = [0.5] * 8  # 假设有8个情感维度
+                print("⚠️  Emotion model not available, using keyword-based emotion analysis")
+                print(f"⚠️  情感模型不可用，使用关键词匹配分析情感文本")
+                # 使用关键词匹配来分析情感文本
+                if hasattr(self, 'qwen_emo') and self.qwen_emo is not None:
+                    emo_dict = self.qwen_emo._fallback_emotion_analysis(emo_text)
+                else:
+                    # 如果连 qwen_emo 对象都不存在，创建一个临时的备用分析
+                    from indextts.infer_v2 import QwenEmotion
+                    temp_qwen = QwenEmotion.__new__(QwenEmotion)
+                    temp_qwen._initialize_default_attributes()
+                    emo_dict = temp_qwen._fallback_emotion_analysis(emo_text)
+                print(f"[IndexTTS2] 分析结果: {emo_dict}")
+                emo_vector = list(emo_dict.values())
 
         if emo_vector is not None:
             emo_audio_prompt = None
