@@ -556,7 +556,10 @@ class IndexTTS2:
                     print("[IndexTTS2] 开始后处理BigVGAN模型...")
 
                     # 检查GPU内存
-                    if self.device.type == 'cuda':
+                    if isinstance(self.device, str) and self.device.startswith('cuda'):
+                        torch.cuda.empty_cache()  # 清理GPU缓存
+                        print(f"[IndexTTS2] GPU内存清理完成")
+                    elif hasattr(self.device, 'type') and self.device.type == 'cuda':
                         torch.cuda.empty_cache()  # 清理GPU缓存
                         print(f"[IndexTTS2] GPU内存清理完成")
 
@@ -641,7 +644,10 @@ class IndexTTS2:
                 print("[IndexTTS2] 开始后处理BigVGAN模型...")
 
                 # 检查GPU内存
-                if self.device.type == 'cuda':
+                if isinstance(self.device, str) and self.device.startswith('cuda'):
+                    torch.cuda.empty_cache()  # 清理GPU缓存
+                    print(f"[IndexTTS2] GPU内存清理完成")
+                elif hasattr(self.device, 'type') and self.device.type == 'cuda':
                     torch.cuda.empty_cache()  # 清理GPU缓存
                     print(f"[IndexTTS2] GPU内存清理完成")
 
