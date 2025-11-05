@@ -471,7 +471,7 @@ class IndexTTS2AdvancedNode:
             model = IndexTTS2(
                 cfg_path=config_path,
                 model_dir=model_dir,
-                is_fp16=use_fp16,
+                use_fp16=use_fp16,
                 use_cuda_kernel=use_cuda_kernel
             )
             
