@@ -143,11 +143,23 @@ class IndexTTS2EmotionVoiceMultiTalkNode:
                 }),
                 "use_fp16": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "使用FP16加速 / Use FP16 acceleration"
+                    "tooltip": "使用FP16加速（降低内存使用）/ Use FP16 acceleration (reduces memory usage)"
                 }),
                 "use_cuda_kernel": ("BOOLEAN", {
                     "default": False,
                     "tooltip": "使用CUDA内核加速 / Use CUDA kernel acceleration"
+                }),
+                "use_accel": ("BOOLEAN", {
+                    "default": True,
+                    "label_on": "启用",
+                    "label_off": "禁用",
+                    "tooltip": "⚡ 启用GPT2加速引擎（推荐，提升30-50%速度）/ Enable GPT2 acceleration engine (recommended, 30-50% faster)"
+                }),
+                "use_torch_compile": ("BOOLEAN", {
+                    "default": False,
+                    "label_on": "启用",
+                    "label_off": "禁用",
+                    "tooltip": "🚀 启用torch.compile优化（首次较慢，后续加速，适合批量处理）/ Enable torch.compile optimization (slow first time, faster afterwards, good for batch processing)"
                 }),
             }
         }
@@ -180,6 +192,8 @@ class IndexTTS2EmotionVoiceMultiTalkNode:
         speed=1.0,
         use_fp16=True,
         use_cuda_kernel=False,
+        use_accel=True,
+        use_torch_compile=False,
     ):
         """
         合成带情绪语音控制的多人对话
@@ -187,7 +201,7 @@ class IndexTTS2EmotionVoiceMultiTalkNode:
         """
         try:
             # 加载模型
-            model = self._load_default_model(use_fp16, use_cuda_kernel)
+            model = self._load_default_model(use_fp16, use_cuda_kernel, use_accel, use_torch_compile)
 
             # 检查是否为单人模式
             if int(num_speakers) == 1:
@@ -292,7 +306,7 @@ class IndexTTS2EmotionVoiceMultiTalkNode:
             traceback.print_exc()
             raise RuntimeError(error_msg)
 
-    def _load_default_model(self, use_fp16=True, use_cuda_kernel=False):
+    def _load_default_model(self, use_fp16=True, use_cuda_kernel=False, use_accel=True, use_torch_compile=False):
         """加载默认模型"""
         try:
             # 统一使用标准导入路径，移除重复导入
@@ -316,8 +330,10 @@ class IndexTTS2EmotionVoiceMultiTalkNode:
                 self.model = IndexTTS2(
                     cfg_path=config_path,
                     model_dir=model_dir,
-                    is_fp16=use_fp16,
-                    use_cuda_kernel=use_cuda_kernel
+                    use_fp16=use_fp16,
+                    use_cuda_kernel=use_cuda_kernel,
+                    use_accel=use_accel,
+                    use_torch_compile=use_torch_compile
                 )
 
                 print("✅ IndexTTS2 model loaded successfully for emotion voice multi-talk")
@@ -370,7 +386,8 @@ class IndexTTS2EmotionVoiceMultiTalkNode:
         # 解析说话人配置参数 (voice, emotion_voice, emotion_alpha)
         config_groups = []
         for i in range(0, len(speaker_configs), 3):
-            if i + 2 < len(speaker_configs):
+            # 确保有完整的3个参数
+            if i + 3 <= len(speaker_configs):
                 config_groups.append(speaker_configs[i:i+3])
 
         speaker_names = ["Speaker1", "Speaker2", "Speaker3", "Speaker4"]

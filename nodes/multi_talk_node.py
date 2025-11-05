@@ -289,13 +289,28 @@ class IndexTTS2MultiTalkNode:
                     "display": "slider"
                 }),
                 "use_fp16": ("BOOLEAN", {
-                    "default": False
+                    "default": False,
+                    "tooltip": "使用半精度推理（降低内存使用）/ Use FP16 inference (reduces memory usage)"
                 }),
                 "use_cuda_kernel": ("BOOLEAN", {
-                    "default": False
+                    "default": False,
+                    "tooltip": "使用CUDA内核加速 / Use CUDA kernel acceleration"
+                }),
+                "use_accel": ("BOOLEAN", {
+                    "default": True,
+                    "label_on": "启用",
+                    "label_off": "禁用",
+                    "tooltip": "⚡ 启用GPT2加速引擎（推荐，提升30-50%速度）/ Enable GPT2 acceleration engine (recommended, 30-50% faster)"
+                }),
+                "use_torch_compile": ("BOOLEAN", {
+                    "default": False,
+                    "label_on": "启用",
+                    "label_off": "禁用",
+                    "tooltip": "🚀 启用torch.compile优化（首次较慢，后续加速，适合批量处理）/ Enable torch.compile optimization (slow first time, faster afterwards, good for batch processing)"
                 }),
                 "verbose": ("BOOLEAN", {
-                    "default": True
+                    "default": True,
+                    "tooltip": "显示详细日志 / Show verbose logs"
                 }),
             }
         }
@@ -333,6 +348,8 @@ class IndexTTS2MultiTalkNode:
         top_p: float = 0.9,
         use_fp16: bool = False,
         use_cuda_kernel: bool = False,
+        use_accel: bool = True,
+        use_torch_compile: bool = False,
         verbose: bool = True
     ) -> Tuple[dict, str, str, str]:
         """
@@ -373,36 +390,42 @@ class IndexTTS2MultiTalkNode:
             # 解析对话文本
             conversation_lines = self._parse_conversation(conversation_text, num_speakers_int, verbose)
 
-            # 准备说话人音频文件（带一致性增强）
-            speaker_audio_paths = self._prepare_speaker_audios(
-                speaker_audios[:num_speakers_int], verbose, voice_consistency, reference_boost
-            )
-
-            # 准备情感控制参数
-            emotion_configs = self._prepare_emotion_configs_from_inputs(
+            # 准备说话人配置（使用字典，键为说话人名称）
+            speaker_configs = self._prepare_speaker_configs(
                 num_speakers_int,
+                speaker_audios,
                 [speaker1_emotion_config, speaker2_emotion_config, speaker3_emotion_config, speaker4_emotion_config],
-                verbose
+                verbose,
+                voice_consistency,
+                reference_boost
             )
 
             # 获取模型实例
             if model_manager is not None:
                 model = model_manager
             else:
-                model = self._load_default_model(use_fp16, use_cuda_kernel)
+                model = self._load_default_model(use_fp16, use_cuda_kernel, use_accel, use_torch_compile)
             
             # 合成每个对话片段（带情感控制）
             audio_segments = []
             emotion_analysis_list = []
 
             for line_info in conversation_lines:
-                speaker_idx = line_info["speaker_idx"]
+                speaker_name = line_info["speaker_name"]
                 text = line_info["text"]
-                speaker_audio_path = speaker_audio_paths[speaker_idx]
-                emotion_config = emotion_configs[speaker_idx]
+
+                # 使用说话人名称查找配置
+                if speaker_name not in speaker_configs:
+                    if verbose:
+                        print(f"[MultiTalk] Warning: Speaker '{speaker_name}' not configured, skipping...")
+                    continue
+
+                speaker_config = speaker_configs[speaker_name]
+                speaker_audio_path = speaker_config["audio_path"]
+                emotion_config = speaker_config["emotion_config"]
 
                 if verbose:
-                    print(f"[MultiTalk] Synthesizing Speaker{speaker_idx + 1}: {text[:50]}...")
+                    print(f"[MultiTalk] Synthesizing {speaker_name}: {text[:50]}...")
                     if emotion_config["mode"] != "none":
                         print(f"[MultiTalk] Emotion mode: {emotion_config['mode']}")
 
@@ -418,7 +441,7 @@ class IndexTTS2MultiTalkNode:
                     model, text, speaker_audio_path, emotion_config,
                     temp_output, temperature, top_p, verbose, voice_consistency, processed_language
                 )
-                emotion_analysis_list.append(f"Speaker{speaker_idx + 1}: {emotion_analysis}")
+                emotion_analysis_list.append(f"{speaker_name}: {emotion_analysis}")
 
                 # 加载合成的音频
                 segment_audio = self._load_audio(temp_output)
@@ -430,8 +453,13 @@ class IndexTTS2MultiTalkNode:
                 except:
                     pass
             
-            # 准备个性化停顿时间配置
-            speaker_pauses = [speaker1_pause, speaker2_pause, speaker3_pause, speaker4_pause]
+            # 准备个性化停顿时间配置（使用字典）
+            speaker_pauses = {
+                "Speaker1": speaker1_pause,
+                "Speaker2": speaker2_pause,
+                "Speaker3": speaker3_pause,
+                "Speaker4": speaker4_pause
+            }
 
             # 合并音频片段（使用个性化停顿时间）
             final_audio = self._merge_audio_segments_with_custom_pauses(
@@ -512,16 +540,16 @@ class IndexTTS2MultiTalkNode:
             # 生成信息字符串（包含个性化停顿时间）
             info = self._generate_info_with_emotion_and_pauses(
                 conversation_lines, num_speakers_int, output_path, language, speed,
-                silence_duration, speaker_pauses, emotion_configs
+                silence_duration, speaker_pauses, speaker_configs
             )
 
             # 生成情感分析字符串
             emotion_analysis = "\n".join(emotion_analysis_list)
 
             # 清理临时文件
-            for path in speaker_audio_paths:
+            for speaker_name, config in speaker_configs.items():
                 try:
-                    os.unlink(path)
+                    os.unlink(config["audio_path"])
                 except:
                     pass
 
@@ -560,7 +588,7 @@ class IndexTTS2MultiTalkNode:
             if model_manager is not None:
                 model = model_manager
             else:
-                model = self._load_default_model(use_fp16, use_cuda_kernel)
+                model = self._load_default_model(use_fp16, use_cuda_kernel, use_accel, use_torch_compile)
 
             # 准备说话人音频
             speaker_audio_path = self._prepare_speaker_audios([speaker_audio], verbose, 1.0, True)[0]
@@ -702,7 +730,6 @@ class IndexTTS2MultiTalkNode:
                         clean_text, pause_time = self._extract_pause_from_text(text)
 
                         conversation_lines.append({
-                            "speaker_idx": i,  # 0-based index
                             "speaker_name": speaker_name,
                             "text": clean_text,
                             "custom_pause": pause_time  # 自定义停顿时间
@@ -722,7 +749,6 @@ class IndexTTS2MultiTalkNode:
                                 clean_text, pause_time = self._extract_pause_from_text(text)
 
                                 conversation_lines.append({
-                                    "speaker_idx": i - 1,  # 0-based index
                                     "speaker_name": f"Speaker{i}",
                                     "text": clean_text,
                                     "custom_pause": pause_time  # 自定义停顿时间
@@ -738,7 +764,6 @@ class IndexTTS2MultiTalkNode:
                 clean_text, pause_time = self._extract_pause_from_text(line)
 
                 conversation_lines.append({
-                    "speaker_idx": 0,
                     "speaker_name": speaker_names[0] if speaker_names else "Speaker1",
                     "text": clean_text,
                     "custom_pause": pause_time  # 自定义停顿时间
@@ -1015,6 +1040,66 @@ class IndexTTS2MultiTalkNode:
 
         return speaker_audio_paths
 
+    def _prepare_speaker_configs(self, num_speakers: int, speaker_audios: List[dict],
+                                emotion_configs_list: List[Optional[dict]], verbose: bool,
+                                voice_consistency: float = 1.0, reference_boost: bool = True) -> Dict[str, Dict]:
+        """准备说话人配置（使用字典，键为说话人名称）
+
+        Returns:
+            Dict[str, Dict]: 说话人配置字典，格式为：
+            {
+                "Speaker1": {"audio_path": "...", "emotion_config": {...}},
+                "Speaker2": {"audio_path": "...", "emotion_config": {...}},
+                ...
+            }
+        """
+        speaker_configs = {}
+        speaker_names = ["Speaker1", "Speaker2", "Speaker3", "Speaker4"]
+
+        for i in range(num_speakers):
+            speaker_name = speaker_names[i]
+            speaker_audio = speaker_audios[i]
+
+            # 验证音频对象
+            if not isinstance(speaker_audio, dict) or "waveform" not in speaker_audio or "sample_rate" not in speaker_audio:
+                raise ValueError(f"{speaker_name} audio must be a ComfyUI AUDIO object")
+
+            waveform = speaker_audio["waveform"]
+            sample_rate = speaker_audio["sample_rate"]
+
+            # 移除batch维度（如果存在）
+            if waveform.dim() == 3:
+                waveform = waveform.squeeze(0)
+
+            # 应用参考音频增强
+            if reference_boost and voice_consistency > 1.0:
+                waveform = self._enhance_reference_audio(waveform, voice_consistency)
+
+            # 创建临时文件
+            with tempfile.NamedTemporaryFile(suffix=f"_{speaker_name}.wav", delete=False) as tmp_file:
+                speaker_audio_path = tmp_file.name
+
+            # 保存音频到临时文件
+            torchaudio.save(speaker_audio_path, waveform, sample_rate)
+
+            # 准备情感配置
+            emotion_config = emotion_configs_list[i] if i < len(emotion_configs_list) and emotion_configs_list[i] is not None else {"mode": "none"}
+
+            # 存储配置
+            speaker_configs[speaker_name] = {
+                "audio_path": speaker_audio_path,
+                "emotion_config": emotion_config
+            }
+
+            if verbose:
+                print(f"[MultiTalk] {speaker_name} 音频: 采样率={sample_rate}, 形状={waveform.shape}")
+                if reference_boost and voice_consistency > 1.0:
+                    print(f"[MultiTalk] {speaker_name} 应用了参考音频增强 (一致性={voice_consistency})")
+                if emotion_config["mode"] != "none":
+                    print(f"[MultiTalk] {speaker_name} 情感模式: {emotion_config['mode']}")
+
+        return speaker_configs
+
     def _smooth_audio_transition(self, audio1: torch.Tensor, audio2: torch.Tensor,
                                fade_samples: int = 1024) -> torch.Tensor:
         """在两个音频片段间添加平滑过渡"""
@@ -1153,7 +1238,7 @@ class IndexTTS2MultiTalkNode:
 
     def _merge_audio_segments_with_custom_pauses(self, audio_segments: List[dict],
                                                conversation_lines: List[Dict],
-                                               speaker_pauses: List[float],
+                                               speaker_pauses: Dict[str, float],
                                                default_silence: float,
                                                verbose: bool) -> dict:
         """合并音频片段（支持每个说话人的个性化停顿时间）"""
@@ -1200,7 +1285,7 @@ class IndexTTS2MultiTalkNode:
 
             # 添加个性化停顿时间
             current_line = conversation_lines[i-1]  # 前一个说话人的停顿
-            current_speaker_idx = current_line["speaker_idx"]
+            current_speaker_name = current_line["speaker_name"]
 
             # 检查是否有自定义停顿时间
             custom_pause = current_line.get("custom_pause")
@@ -1209,7 +1294,7 @@ class IndexTTS2MultiTalkNode:
                 pause_source = "文本标记"
             else:
                 # 使用说话人设置的停顿时间
-                pause_duration = speaker_pauses[current_speaker_idx] if current_speaker_idx < len(speaker_pauses) else default_silence
+                pause_duration = speaker_pauses.get(current_speaker_name, default_silence)
                 pause_source = "说话人设置"
 
             if pause_duration > 0:
@@ -1223,13 +1308,14 @@ class IndexTTS2MultiTalkNode:
                 total_pause_time += pause_duration
 
                 if verbose:
-                    print(f"[MultiTalk] Speaker{current_speaker_idx + 1} 停顿时间: {pause_duration:.2f}秒 ({pause_source}) [平滑过渡]")
+                    print(f"[MultiTalk] {current_speaker_name} 停顿时间: {pause_duration:.2f}秒 ({pause_source}) [平滑过渡]")
             else:
                 # 直接使用平滑过渡连接
                 current_waveform = self._smooth_audio_transition(current_waveform, next_waveform, fade_samples)
 
                 if verbose:
-                    print(f"[MultiTalk] Speaker{current_speaker_idx + 1} -> Speaker{conversation_lines[i]['speaker_idx'] + 1} [平滑过渡]")
+                    next_speaker_name = conversation_lines[i]["speaker_name"]
+                    print(f"[MultiTalk] {current_speaker_name} -> {next_speaker_name} [平滑过渡]")
 
         final_waveform = current_waveform
 
@@ -1247,11 +1333,11 @@ class IndexTTS2MultiTalkNode:
             "sample_rate": sample_rate
         }
 
-    def _load_default_model(self, use_fp16: bool, use_cuda_kernel: bool):
+    def _load_default_model(self, use_fp16: bool, use_cuda_kernel: bool, use_accel: bool = True, use_torch_compile: bool = False):
         """加载默认模型（带缓存机制）"""
         try:
             # 创建缓存键
-            cache_key = f"fp16_{use_fp16}_cuda_{use_cuda_kernel}"
+            cache_key = f"fp16_{use_fp16}_cuda_{use_cuda_kernel}_accel_{use_accel}_compile_{use_torch_compile}"
 
             # 检查是否已有缓存的模型实例
             if not hasattr(self, '_model_cache'):
@@ -1289,8 +1375,10 @@ class IndexTTS2MultiTalkNode:
             model = IndexTTS2(
                 cfg_path=config_path,
                 model_dir=model_dir,
-                is_fp16=use_fp16,
-                use_cuda_kernel=use_cuda_kernel
+                use_fp16=use_fp16,
+                use_cuda_kernel=use_cuda_kernel,
+                use_accel=use_accel,
+                use_torch_compile=use_torch_compile
             )
 
             # 验证模型初始化是否成功
@@ -1383,8 +1471,8 @@ class IndexTTS2MultiTalkNode:
 
     def _generate_info_with_emotion_and_pauses(self, conversation_lines: List[Dict], num_speakers: int,
                                              output_path: str, language: str, speed: float,
-                                             silence_duration: float, speaker_pauses: List[float],
-                                             emotion_configs: List[Dict]) -> str:
+                                             silence_duration: float, speaker_pauses: Dict[str, float],
+                                             speaker_configs: Dict[str, Dict]) -> str:
         """生成包含情感信息和个性化停顿时间的信息字符串"""
         info_lines = [
             "=== IndexTTS2 Multi-Talk Synthesis with Emotion Control & Custom Pauses ===",
@@ -1399,9 +1487,11 @@ class IndexTTS2MultiTalkNode:
         ]
 
         # 添加每个说话人的停顿时间设置
+        speaker_names = ["Speaker1", "Speaker2", "Speaker3", "Speaker4"]
         for i in range(num_speakers):
-            pause_time = speaker_pauses[i] if i < len(speaker_pauses) else silence_duration
-            info_lines.append(f"Speaker{i+1} Pause: {pause_time:.2f}s")
+            speaker_name = speaker_names[i]
+            pause_time = speaker_pauses.get(speaker_name, silence_duration)
+            info_lines.append(f"{speaker_name} Pause: {pause_time:.2f}s")
 
         info_lines.extend([
             "",
@@ -1409,11 +1499,13 @@ class IndexTTS2MultiTalkNode:
         ])
 
         # 添加每个说话人的情感设置
-        for i, emotion_config in enumerate(emotion_configs):
-            if i < num_speakers:
+        for i in range(num_speakers):
+            speaker_name = speaker_names[i]
+            if speaker_name in speaker_configs:
+                emotion_config = speaker_configs[speaker_name]["emotion_config"]
                 mode = emotion_config.get("mode", "none")
-                pause_time = speaker_pauses[i] if i < len(speaker_pauses) else silence_duration
-                info_lines.append(f"Speaker{i+1}: {mode} (Pause: {pause_time:.2f}s)")
+                pause_time = speaker_pauses.get(speaker_name, silence_duration)
+                info_lines.append(f"{speaker_name}: {mode} (Pause: {pause_time:.2f}s)")
 
                 if mode == "emotion_vector":
                     vector = emotion_config.get("vector", [])
@@ -1440,7 +1532,7 @@ class IndexTTS2MultiTalkNode:
         # 添加对话预览（最多显示前5行）
         for i, line in enumerate(conversation_lines[:5]):
             preview_text = line["text"][:60] + "..." if len(line["text"]) > 60 else line["text"]
-            speaker_idx = line["speaker_idx"]
+            speaker_name = line["speaker_name"]
 
             # 优先显示文本中的自定义停顿时间
             custom_pause = line.get("custom_pause")
@@ -1448,10 +1540,10 @@ class IndexTTS2MultiTalkNode:
                 pause_time = custom_pause
                 pause_source = "文本"
             else:
-                pause_time = speaker_pauses[speaker_idx] if speaker_idx < len(speaker_pauses) else silence_duration
+                pause_time = speaker_pauses.get(speaker_name, silence_duration)
                 pause_source = "设置"
 
-            info_lines.append(f"{line['speaker_name']}: {preview_text} [Pause: {pause_time:.2f}s ({pause_source})]")
+            info_lines.append(f"{speaker_name}: {preview_text} [Pause: {pause_time:.2f}s ({pause_source})]")
 
         if len(conversation_lines) > 5:
             info_lines.append(f"... and {len(conversation_lines) - 5} more lines")
