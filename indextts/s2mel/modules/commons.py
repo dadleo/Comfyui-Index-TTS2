@@ -437,6 +437,19 @@ class MyModel(nn.Module):
         x = self.models['gpt_layer'](x)
         return x
 
+    def enable_torch_compile(self):
+        """Enable torch.compile optimization for CFM model"""
+        try:
+            import torch
+            if hasattr(torch, 'compile'):
+                print(">> Compiling CFM model with torch.compile")
+                self.models['cfm'] = torch.compile(self.models['cfm'])
+                print(">> CFM model compiled successfully")
+            else:
+                print(">> torch.compile not available (requires PyTorch >= 2.0)")
+        except Exception as e:
+            print(f">> Failed to compile CFM model: {e}")
+
 
 
 def build_model(args, stage="DiT"):
