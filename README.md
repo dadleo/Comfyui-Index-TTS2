@@ -33,7 +33,16 @@ IndexTTS2 has evolved from a traditional text-to-speech system into an **intelli
 
 ## 🎉 Major Updates - Complete System Overhaul
 
-### 🚀 Phase 3: AI Enhancement & Adaptive Optimization (Latest)
+### ⚡ Phase 4: Acceleration & Critical Fixes (2025-11-05) (Latest)
+**🚀 Performance & Stability Improvements**
+- **GPT2 Acceleration Engine**: Official acceleration features integrated from upstream (30-50% speed boost)
+- **Torch Compile Optimization**: PyTorch 2.0+ compilation support for enhanced performance
+- **Emotion Text Analysis Fix**: Keyword-based emotion analysis when Qwen model unavailable
+- **Parameter Compatibility Fix**: Corrected `is_fp16` → `use_fp16` across all nodes
+- **Device Handling Fix**: Proper string/torch.device handling in BigVGAN initialization
+- **Comprehensive Documentation**: Added update instructions and troubleshooting guides
+
+### 🚀 Phase 3: AI Enhancement & Adaptive Optimization
 **🧠 Intelligent Learning Systems**
 - **Smart Parameter Learning**: Automatic optimization based on usage history and speaker characteristics
 - **Adaptive Audio Enhancement**: Context-aware processing with emotion recognition (5 emotions, 5 content types)
@@ -978,6 +987,28 @@ Speaker2: I'm great! -1.2s- Thanks for asking.
 <details>
 <summary><b>❌ Installation Issues</b></summary>
 
+### ❌ Parameter Error: 'is_fp16' not recognized
+
+**Error Message**: `TypeError: IndexTTS2.__init__() got an unexpected keyword argument 'is_fp16'`
+
+**Cause**: Outdated code version (fixed in 2025-11-05 update)
+
+**Solution**:
+```bash
+# 1. Update to latest version
+cd ComfyUI/custom_nodes/Comfyui-Index-TTS2
+git pull origin main
+
+# 2. Restart ComfyUI completely
+# Close ComfyUI and restart
+
+# 3. Verify update
+git log --oneline -3
+# Should show: "fix: correct parameter name from is_fp16 to use_fp16"
+```
+
+**📖 For detailed instructions**: See [UPDATE_INSTRUCTIONS.md](UPDATE_INSTRUCTIONS.md)
+
 ### ❌ Transformers Compatibility Error
 
 **Error Message**: `cannot import name 'QuantizedCacheConfig' from 'transformers.cache_utils'`
@@ -1061,6 +1092,36 @@ If you experience audio playback problems:
 
 <details>
 <summary><b>🎭 Emotion Control Issues</b></summary>
+
+### ❌ Problem: Emotion Text Description Not Working
+
+**Symptoms**:
+- You use text descriptions like "happy and excited"
+- Generated voice sounds neutral or doesn't match description
+- Console shows default emotion values
+
+**Root Cause**: Qwen emotion model not available (fixed in 2025-11-05 update)
+
+**✅ Solution (Automatic)**:
+The latest version includes **keyword-based emotion analysis** as fallback:
+```bash
+# Update to latest version
+git pull origin main
+# Restart ComfyUI
+```
+
+**How It Works Now**:
+- System detects emotion keywords in your text (Chinese & English)
+- Analyzes emotion intensity with weighted scoring
+- Generates appropriate emotion vectors automatically
+- Works even without Qwen model!
+
+**Supported Keywords**:
+- **Happy**: 开心, 高兴, 快乐, 兴奋, happy, excited, joyful
+- **Angry**: 生气, 愤怒, 气愤, angry, furious, mad
+- **Sad**: 伤心, 难过, 悲伤, sad, depressed, sorrowful
+- **Fear**: 害怕, 恐惧, 担心, fear, scared, anxious
+- And more... (see [EMOTION_TEXT_FIX.md](EMOTION_TEXT_FIX.md))
 
 ### ❌ Problem: Emotion Vector Values Ignored (Shows "neutral: 1.0")
 
@@ -1178,6 +1239,11 @@ nvidia-smi
 - 🔧 **[DEPENDENCY_INSTALLATION_GUIDE.md](DEPENDENCY_INSTALLATION_GUIDE.md)** - Installation guide
 - 🎭 **[MODULAR_EMOTION_CONTROL_GUIDE.md](MODULAR_EMOTION_CONTROL_GUIDE.md)** - Emotion control
 - 🗣️ **[MULTI_TALK_GUIDE.md](MULTI_TALK_GUIDE.md)** - Multi-speaker conversations
+
+**Latest Updates & Fixes (2025-11-05)**:
+- 🔄 **[UPDATE_INSTRUCTIONS.md](UPDATE_INSTRUCTIONS.md)** - How to update to latest version
+- 🎭 **[EMOTION_TEXT_FIX.md](EMOTION_TEXT_FIX.md)** - Emotion text description fix details
+- ⚡ **[ACCELERATION_FEATURES.md](ACCELERATION_FEATURES.md)** - GPT2 acceleration guide (if exists)
 
 ### 🧪 Testing & Validation Tools
 ```bash
