@@ -1,231 +1,27 @@
-# ================================================================
-# ComfyUI IndexTTS2 Plugin - Project Configuration
-# ================================================================
-# This file contains metadata for publishing to ComfyUI Registry
-# and ComfyUI-Manager integration
-# ================================================================
-
-[build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
-
-# ================================================================
-# Project Metadata
-# ================================================================
 [project]
 name = "comfyui-indextts2"
-version = "1.2.0"
-description = "Professional AI-Enhanced Text-to-Speech system with multi-speaker support, emotion control, and GPT2 acceleration for ComfyUI"
-readme = "README.md"
-requires-python = ">=3.8"
-license = {text = "Apache-2.0"}
-authors = [
-    {name = "xuchenxu168", email = ""},
-]
-maintainers = [
-    {name = "xuchenxu168", email = ""},
-]
-keywords = [
-    "comfyui",
-    "text-to-speech",
-    "tts",
-    "voice-cloning",
-    "multi-speaker",
-    "emotion-control",
-    "ai-enhancement",
-    "speech-synthesis",
-    "indextts",
-    "indextts2",
-]
+description = "ComfyUI-SoulX-Podcast is a custom node plugin for ComfyUI that packages the core functionality of SoulX-Podcast (long-form, multi-speaker, multi-dialect podcast voice generation) into a visual workflow"
+version = "1.0.1"
+license = { file = "LICENSE" }
 
-# Project classifiers for better discoverability
 classifiers = [
-    # Development Status
     "Development Status :: 4 - Beta",
-    
-    # Intended Audience
-    "Intended Audience :: Developers",
-    "Intended Audience :: Science/Research",
-    "Intended Audience :: End Users/Desktop",
-    
-    # Topic
-    "Topic :: Multimedia :: Sound/Audio :: Speech",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Software Development :: Libraries :: Python Modules",
-    
-    # Operating System - Works on all platforms
     "Operating System :: OS Independent",
-    
-    # GPU Accelerator Support
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
     "Environment :: GPU :: NVIDIA CUDA",
     "Environment :: GPU :: AMD ROCm",
-    
-    # Programming Language
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    
-    # License
-    "License :: OSI Approved :: Apache Software License",
+    "Environment :: GPU :: Apple Metal",
 ]
 
-# Dynamic dependencies from requirements.txt
-dynamic = ["dependencies"]
-
-# ================================================================
-# Project URLs
-# ================================================================
 [project.urls]
-Homepage = "https://github.com/xuchenxu168/Comfyui-Index-TTS2"
 Repository = "https://github.com/xuchenxu168/Comfyui-Index-TTS2"
-Documentation = "https://github.com/xuchenxu168/Comfyui-Index-TTS2/blob/main/README.md"
 "Bug Tracker" = "https://github.com/xuchenxu168/Comfyui-Index-TTS2/issues"
-Changelog = "https://github.com/xuchenxu168/Comfyui-Index-TTS2/commits/main"
 
-# ================================================================
-# Setuptools Configuration
-# ================================================================
-[tool.setuptools]
-packages = ["indextts", "nodes"]
-include-package-data = true
-
-[tool.setuptools.dynamic]
-dependencies = {file = ["requirements.txt"]}
-
-[tool.setuptools.package-data]
-"*" = [
-    "*.yaml",
-    "*.json",
-    "*.txt",
-    "*.md",
-    "*.png",
-    "*.jpg",
-    "*.svg",
-    "*.gif",
-    "*.whl",
-]
-
-# ================================================================
-# ComfyUI Registry Configuration
-# ================================================================
 [tool.comfy]
-# Publisher ID - Your unique identifier on ComfyUI Registry
-# Get this from: https://registry.comfy.org/nodes
 PublisherId = "xuchenxu168"
-
-# Display name shown in ComfyUI Registry and Manager
-DisplayName = "IndexTTS2 - AI-Enhanced Text-to-Speech"
-
-# Icon URL (400x400px, square aspect ratio)
-# Supported formats: SVG, PNG, JPG, GIF
-Icon = "https://raw.githubusercontent.com/xuchenxu168/Comfyui-Index-TTS2/main/docs/icon.png"
-
-# Banner URL (21:9 aspect ratio)
-# Supported formats: SVG, PNG, JPG, GIF
-Banner = "https://raw.githubusercontent.com/xuchenxu168/Comfyui-Index-TTS2/main/docs/banner.png"
-
-# ComfyUI version compatibility
-# Supports: <, >, <=, >=, ~=, <>, !=, and ranges
-requires-comfyui = ">=0.1.0"
-
-# Force include specific folders (e.g., build output in .gitignore)
-# includes = ["dist", "build"]
-
-# ================================================================
-# Optional Dependencies
-# ================================================================
-[project.optional-dependencies]
-# Development dependencies
-dev = [
-    "pytest>=7.0.0",
-    "pytest-cov>=4.0.0",
-    "black>=23.0.0",
-    "flake8>=6.0.0",
-    "mypy>=1.0.0",
-]
-
-# Windows-specific optional dependencies
-windows = [
-    "pynini==2.1.6; platform_system=='Windows'",
-]
-
-# Acceleration features
-acceleration = [
-    "triton>=2.0.0; platform_system=='Linux'",
-    "flash-attn>=2.0.0",
-]
-
-# All optional features
-all = [
-    "comfyui-indextts2[dev]",
-    "comfyui-indextts2[windows]",
-    "comfyui-indextts2[acceleration]",
-]
-
-# ================================================================
-# Tool Configurations
-# ================================================================
-
-# Black code formatter
-[tool.black]
-line-length = 100
-target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
-include = '\.pyi?$'
-extend-exclude = '''
-/(
-  # directories
-  \.eggs
-  | \.git
-  | \.hg
-  | \.mypy_cache
-  | \.tox
-  | \.venv
-  | build
-  | dist
-  | __pycache__
-  | checkpoints
-  | audio
-)/
-'''
-
-# Pytest configuration
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-addopts = [
-    "--verbose",
-    "--cov=indextts",
-    "--cov=nodes",
-    "--cov-report=term-missing",
-    "--cov-report=html",
-]
-
-# MyPy type checking
-[tool.mypy]
-python_version = "3.8"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = false
-ignore_missing_imports = true
-
-# ================================================================
-# Package Metadata
-# ================================================================
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["indextts*", "nodes*"]
-exclude = [
-    "tests*",
-    "docs*",
-    "workflow-examples*",
-    "audio*",
-    "checkpoints*",
-    "__pycache__*",
-    "*.pyc",
-]
+DisplayName = "ComfyUI-SoulX-Podcast"
+Icon = ""
+Banner = ""
 
