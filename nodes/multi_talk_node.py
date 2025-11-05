@@ -404,7 +404,7 @@ class IndexTTS2MultiTalkNode:
             if model_manager is not None:
                 model = model_manager
             else:
-                model = self._load_default_model(use_fp16, use_cuda_kernel)
+                model = self._load_default_model(use_fp16, use_cuda_kernel, use_accel, use_torch_compile)
             
             # 合成每个对话片段（带情感控制）
             audio_segments = []
@@ -588,7 +588,7 @@ class IndexTTS2MultiTalkNode:
             if model_manager is not None:
                 model = model_manager
             else:
-                model = self._load_default_model(use_fp16, use_cuda_kernel)
+                model = self._load_default_model(use_fp16, use_cuda_kernel, use_accel, use_torch_compile)
 
             # 准备说话人音频
             speaker_audio_path = self._prepare_speaker_audios([speaker_audio], verbose, 1.0, True)[0]
@@ -1333,11 +1333,11 @@ class IndexTTS2MultiTalkNode:
             "sample_rate": sample_rate
         }
 
-    def _load_default_model(self, use_fp16: bool, use_cuda_kernel: bool):
+    def _load_default_model(self, use_fp16: bool, use_cuda_kernel: bool, use_accel: bool = True, use_torch_compile: bool = False):
         """加载默认模型（带缓存机制）"""
         try:
             # 创建缓存键
-            cache_key = f"fp16_{use_fp16}_cuda_{use_cuda_kernel}"
+            cache_key = f"fp16_{use_fp16}_cuda_{use_cuda_kernel}_accel_{use_accel}_compile_{use_torch_compile}"
 
             # 检查是否已有缓存的模型实例
             if not hasattr(self, '_model_cache'):
