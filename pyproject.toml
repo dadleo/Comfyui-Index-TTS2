@@ -1,7 +1,7 @@
 [project]
-name = "comfyui-indextts2"
-description = "ComfyUI-SoulX-Podcast is a custom node plugin for ComfyUI that packages the core functionality of SoulX-Podcast (long-form, multi-speaker, multi-dialect podcast voice generation) into a visual workflow"
-version = "1.0.1"
+name = "comfyui-index-tts2"
+description = "ComfyUI-Index-TTS2 is a custom node plugin for ComfyUI that packages the core functionality of IndexTTS2 (long-form, multi-speaker, multi-dialect podcast voice generation) into a visual workflow"
+version = "1.0.2"
 license = { file = "LICENSE" }
 
 classifiers = [
@@ -21,7 +21,7 @@ Repository = "https://github.com/xuchenxu168/Comfyui-Index-TTS2"
 
 [tool.comfy]
 PublisherId = "xuchenxu168"
-DisplayName = "ComfyUI-SoulX-Podcast"
+DisplayName = "ComfyUI-Index-TTS2"
 Icon = ""
 Banner = ""
 
