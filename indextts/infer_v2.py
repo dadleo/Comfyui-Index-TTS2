@@ -2,6 +2,8 @@ import os
 from subprocess import CalledProcessError
 
 os.environ['HF_HUB_CACHE'] = './checkpoints/hf_cache'
+import json
+import re
 import time
 import librosa
 import torch
@@ -30,6 +32,7 @@ from indextts.compat.simple_imports import AutoTokenizer, SeamlessM4TFeatureExtr
 from modelscope import AutoModelForCausalLM
 from huggingface_hub import hf_hub_download
 import safetensors
+from transformers import SeamlessM4TFeatureExtractor
 import random
 import torch.nn.functional as F
 
@@ -89,7 +92,7 @@ class AdvancedResampler:
 class IndexTTS2:
     def __init__(
             self, cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_fp16=False, device=None,
-            use_cuda_kernel=None, use_deepspeed=False, use_accel=False, use_torch_compile=False
+            use_cuda_kernel=None,use_deepspeed=False, use_accel=False, use_torch_compile=False
     ):
         """
         Args:
@@ -226,14 +229,7 @@ class IndexTTS2:
 
         print("[IndexTTS2] ✓ 属性初始化完成")
 
-        # 检查qwen_emo模型路径是否存在
-        qwen_emo_path = os.path.join(self.model_dir, self.cfg.qwen_emo_path)
-        if os.path.exists(qwen_emo_path):
-            self.qwen_emo = QwenEmotion(qwen_emo_path)
-        else:
-            print(f"⚠️  Qwen emotion model not found at: {qwen_emo_path}")
-            print("⚠️  Emotion analysis will be disabled")
-            self.qwen_emo = None
+        self.qwen_emo = QwenEmotion(os.path.join(self.model_dir, self.cfg.qwen_emo_path))
 
         self.gpt = UnifiedVoice(**self.cfg.gpt, use_accel=self.use_accel)
         self.gpt_path = os.path.join(self.model_dir, self.cfg.gpt_checkpoint)
@@ -245,7 +241,6 @@ class IndexTTS2:
             self.gpt.eval()
         print(">> GPT weights restored from:", self.gpt_path)
 
-        # DeepSpeed 支持
         if use_deepspeed:
             try:
                 import deepspeed
@@ -253,20 +248,17 @@ class IndexTTS2:
                 use_deepspeed = False
                 print(f">> Failed to load DeepSpeed. Falling back to normal inference. Error: {e}")
 
-        if self.use_fp16:
-            self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=True)
-        else:
-            self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=False)
+        self.gpt.post_init_gpt2_config(use_deepspeed=use_deepspeed, kv_cache=True, half=self.use_fp16)
 
         if self.use_cuda_kernel:
             # preload the CUDA kernel for BigVGAN
             try:
-                from indextts.BigVGAN.alias_free_activation.cuda import load
+                from indextts.s2mel.modules.bigvgan.alias_free_activation.cuda import activation1d
 
-                anti_alias_activation_cuda = load.load()
-                print(">> Preload custom CUDA kernel for BigVGAN", anti_alias_activation_cuda)
-            except:
+                print(">> Preload custom CUDA kernel for BigVGAN", activation1d.anti_alias_activation_cuda)
+            except Exception as e:
                 print(">> Failed to load custom CUDA kernel for BigVGAN. Falling back to torch.")
+                print(f"{e!r}")
                 self.use_cuda_kernel = False
 
         # 检查本地是否已有w2v-bert模型文件
@@ -381,6 +373,7 @@ class IndexTTS2:
             semantic_code_ckpt = str(local_maskgct_path)
         else:
             print(f"[IndexTTS2] 本地未找到MaskGCT语义编解码器，尝试从远程下载...")
+            from indextts.utils.model_cache_manager import get_hf_download_kwargs
             maskgct_kwargs = get_hf_download_kwargs("amphion/MaskGCT")
             semantic_code_ckpt = hf_hub_download(
                 "amphion/MaskGCT",
@@ -448,6 +441,7 @@ class IndexTTS2:
             campplus_ckpt_path = str(local_campplus_path)
         else:
             print(f"[IndexTTS2] 本地未找到CAMPPlus模型，尝试从远程下载...")
+            from indextts.utils.model_cache_manager import get_hf_download_kwargs
             campplus_kwargs = get_hf_download_kwargs("funasr/campplus")
             campplus_ckpt_path = hf_hub_download(
                 "funasr/campplus",
@@ -466,10 +460,6 @@ class IndexTTS2:
         bigvgan_kwargs = get_bigvgan_download_kwargs(bigvgan_name)
         
         # 检查本地是否已有BigVGAN模型文件
-        from indextts.utils.model_cache_manager import get_indextts2_cache_dir
-        cache_dir = get_indextts2_cache_dir()
-
-        # 初始化local_bigvgan_path变量
         local_bigvgan_path = None
 
         # 检查多个可能的本地路径
@@ -714,16 +704,9 @@ class IndexTTS2:
                 break
 
         if not self.bpe_path:
-            print(f"[ERROR] 未找到BPE模型文件，尝试的路径:")
-            for path in possible_bpe_paths:
-                print(f"  {path} - {'存在' if os.path.exists(path) else '不存在'}")
-            print(f"[ERROR] 当前model_dir: {self.model_dir}")
-            print(f"[ERROR] 配置中的BPE文件名: {bpe_filename}")
             raise FileNotFoundError(f"BPE模型文件未找到: {bpe_filename}")
 
         print("[IndexTTS2] 开始创建TextNormalizer...")
-
-        # 基于操作系统选择TextNormalizer版本
         import platform
         current_os = platform.system()
         print(f"[IndexTTS2] 检测到操作系统: {current_os}")
@@ -750,12 +733,15 @@ class IndexTTS2:
         else:
             print(f"[IndexTTS2] 非Windows系统（{current_os}），使用简化版TextNormalizer...")
             try:
-                self.normalizer = self._create_fallback_normalizer()
-                print("[IndexTTS2] ✓ 使用简化版TextNormalizer（适配非Windows系统）")
-                print(">> TextNormalizer loaded")
+                # --- FIX: Attempt Smart Normalizer First on ALL Platforms ---
+                from indextts.utils.front import TextNormalizer
+                self.normalizer = TextNormalizer()
+                self.normalizer.load()
+                print("[IndexTTS2] ✓ Using Standard TextNormalizer")
             except Exception as e:
-                print(f"[ERROR] 创建简化TextNormalizer失败: {e}")
-                raise RuntimeError(f"TextNormalizer初始化失败: {e}")
+                print(f"[IndexTTS2] Standard TextNormalizer failed ({e}), using Fallback.")
+                self.normalizer = self._create_fallback_normalizer()
+            print(">> TextNormalizer loaded")
 
         # 创建TextTokenizer
         try:
@@ -788,6 +774,28 @@ class IndexTTS2:
         except Exception as e:
             print(f"[ERROR] 矩阵加载失败: {e}")
             raise RuntimeError(f"矩阵加载失败: {e}")
+
+        # 后备mel_fn初始化（如果前面失败了）
+        if self.mel_fn is None:
+            try:
+                from indextts.s2mel.modules.audio import mel_spectrogram
+                mel_fn_args = {
+                    "n_fft": self.cfg.s2mel['preprocess_params']['spect_params']['n_fft'],
+                    "win_size": self.cfg.s2mel['preprocess_params']['spect_params']['win_length'],
+                    "hop_size": self.cfg.s2mel['preprocess_params']['spect_params']['hop_length'],
+                    "num_mels": self.cfg.s2mel['preprocess_params']['spect_params']['n_mels'],
+                    "sampling_rate": self.cfg.s2mel["preprocess_params"]["sr"],
+                    "fmin": self.cfg.s2mel['preprocess_params']['spect_params'].get('fmin', 0),
+                    "fmax": None if self.cfg.s2mel['preprocess_params']['spect_params'].get('fmax', "None") == "None" else 8000,
+                    "center": False
+                }
+                self.mel_fn = lambda x: mel_spectrogram(x, **mel_fn_args)
+                print("[IndexTTS2] ✓ mel_fn后备初始化成功")
+            except Exception as e:
+                print(f"[ERROR] mel_fn后备初始化也失败: {e}")
+                raise RuntimeError(f"无法初始化mel_fn函数: {e}")
+
+        print("[IndexTTS2] ✓ IndexTTS2初始化完成")
 
     def _create_fallback_normalizer(self):
         """创建一个增强的TextNormalizer作为回退方案，包含数字转换功能"""
@@ -941,30 +949,6 @@ class IndexTTS2:
 
         return EnhancedFallbackTextNormalizer()
 
-
-
-        # 后备mel_fn初始化（如果前面失败了）
-        if self.mel_fn is None:
-            try:
-                from indextts.s2mel.modules.audio import mel_spectrogram
-                mel_fn_args = {
-                    "n_fft": self.cfg.s2mel['preprocess_params']['spect_params']['n_fft'],
-                    "win_size": self.cfg.s2mel['preprocess_params']['spect_params']['win_length'],
-                    "hop_size": self.cfg.s2mel['preprocess_params']['spect_params']['hop_length'],
-                    "num_mels": self.cfg.s2mel['preprocess_params']['spect_params']['n_mels'],
-                    "sampling_rate": self.cfg.s2mel["preprocess_params"]["sr"],
-                    "fmin": self.cfg.s2mel['preprocess_params']['spect_params'].get('fmin', 0),
-                    "fmax": None if self.cfg.s2mel['preprocess_params']['spect_params'].get('fmax', "None") == "None" else 8000,
-                    "center": False
-                }
-                self.mel_fn = lambda x: mel_spectrogram(x, **mel_fn_args)
-                print("[IndexTTS2] ✓ mel_fn后备初始化成功")
-            except Exception as e:
-                print(f"[ERROR] mel_fn后备初始化也失败: {e}")
-                raise RuntimeError(f"无法初始化mel_fn函数: {e}")
-
-        print("[IndexTTS2] ✓ IndexTTS2初始化完成")
-
     @torch.no_grad()
     def get_emb(self, input_features, attention_mask):
         vq_emb = self.semantic_model(
@@ -1033,9 +1017,23 @@ class IndexTTS2:
         code_lens = torch.tensor(code_lens, dtype=torch.long, device=device)
         return codes, code_lens
 
+    def interval_silence(self, wavs, sampling_rate=22050, interval_silence=200):
+        """
+        Silences to be insert between generated segments.
+        """
+
+        if not wavs or interval_silence <= 0:
+            return wavs
+
+        # get channel_size
+        channel_size = wavs[0].size(0)
+        # get silence tensor
+        sil_dur = int(sampling_rate * interval_silence / 1000.0)
+        return torch.zeros(channel_size, sil_dur)
+
     def insert_interval_silence(self, wavs, sampling_rate=22050, interval_silence=200):
         """
-        Insert silences between sentences.
+        Insert silences between generated segments.
         wavs: List[torch.tensor]
         """
 
@@ -1060,100 +1058,148 @@ class IndexTTS2:
         if self.gr_progress is not None:
             self.gr_progress(value, desc=desc)
 
+    def _load_and_cut_audio(self,audio_path,max_audio_length_seconds,verbose=False,sr=None):
+        if not sr:
+            audio, sr = librosa.load(audio_path)
+        else:
+            audio, _ = librosa.load(audio_path,sr=sr)
+        audio = torch.tensor(audio).unsqueeze(0)
+        max_audio_samples = int(max_audio_length_seconds * sr)
+
+        if audio.shape[1] > max_audio_samples:
+            if verbose:
+                print(f"Audio too long ({audio.shape[1]} samples), truncating to {max_audio_samples} samples")
+            audio = audio[:, :max_audio_samples]
+        return audio, sr
+    
+    def normalize_emo_vec(self, emo_vector, apply_bias=True):
+        # apply biased emotion factors for better user experience,
+        # by de-emphasizing emotions that can cause strange results
+        if apply_bias:
+            # [happy, angry, sad, afraid, disgusted, melancholic, surprised, calm]
+            emo_bias = [0.9375, 0.875, 1.0, 1.0, 0.9375, 0.9375, 0.6875, 0.5625]
+            emo_vector = [vec * bias for vec, bias in zip(emo_vector, emo_bias)]
+
+        # the total emotion sum must be 0.8 or less
+        emo_sum = sum(emo_vector)
+        if emo_sum > 0.8:
+            scale_factor = 0.8 / emo_sum
+            emo_vector = [vec * scale_factor for vec in emo_vector]
+
+        return emo_vector
+
     # 原始推理模式
     def infer(self, spk_audio_prompt, text, output_path,
               emo_audio_prompt=None, emo_alpha=1.0,
               emo_vector=None,
               use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
-              verbose=False, max_text_tokens_per_sentence=120, **generation_kwargs):
-        self._set_gr_progress(0, "start inference...")
+              verbose=False, max_text_tokens_per_sentence=120, speed=1.0, **generation_kwargs): # <--- Added speed
+        
+        # Check if speed is passed in kwargs (common in ComfyUI wrappers)
+        if 'speed' in generation_kwargs:
+            speed = generation_kwargs.pop('speed')
+
+        if 'stream_return' in generation_kwargs:
+            stream_return = generation_kwargs.pop('stream_return')
+            return self.infer_generator(
+                spk_audio_prompt, text, output_path,
+                emo_audio_prompt, emo_alpha,
+                emo_vector,
+                use_emo_text, emo_text, use_random, interval_silence,
+                verbose, max_text_tokens_per_sentence, stream_return,
+                speed=speed, # <--- Pass speed
+                **generation_kwargs
+            )
+        else:
+            try:
+                return list(self.infer_generator(
+                    spk_audio_prompt, text, output_path,
+                    emo_audio_prompt, emo_alpha,
+                    emo_vector,
+                    use_emo_text, emo_text, use_random, interval_silence,
+                    verbose, max_text_tokens_per_sentence,
+                    speed=speed, # <--- Pass speed
+                    **generation_kwargs
+                ))[0]
+            except IndexError:
+                return None
+
+    def infer_generator(self, spk_audio_prompt, text, output_path,
+              emo_audio_prompt=None, emo_alpha=1.0,
+              emo_vector=None,
+              use_emo_text=False, emo_text=None, use_random=False, interval_silence=200,
+              verbose=False, max_text_tokens_per_sentence=120, stream_return=False, quick_streaming_tokens=0, 
+              speed=1.0, # <--- Added speed argument
+              **generation_kwargs):
+        print(">> starting inference...")
+        self._set_gr_progress(0, "starting inference...")
         if verbose:
-            print(f"origin text:{text}, spk_audio_prompt:{spk_audio_prompt},"
-                  f" emo_audio_prompt:{emo_audio_prompt}, emo_alpha:{emo_alpha}, "
+            print(f"origin text:{text}, spk_audio_prompt:{spk_audio_prompt}, "
+                  f"emo_audio_prompt:{emo_audio_prompt}, emo_alpha:{emo_alpha}, "
                   f"emo_vector:{emo_vector}, use_emo_text:{use_emo_text}, "
                   f"emo_text:{emo_text}")
         start_time = time.perf_counter()
+        
+        # FIX: Remove extra kwargs (Corrected)
+        generation_kwargs.pop('max_text_tokens_per_segment', None)
+        generation_kwargs.pop('max_text_tokens_per_sentence', None)
 
-        # AI增强系统预处理
-        speaker_id = f"speaker_{hash(str(spk_audio_prompt)) % 10000}"  # 简化的说话人ID
-        original_params = generation_kwargs.copy()
-        quality_prediction = None
-
-        if AI_ENHANCED_SYSTEMS_AVAILABLE and self.quality_predictor:
-            try:
-                # 质量预测
-                quality_prediction = self.quality_predictor.predict_quality(text, speaker_id, original_params)
-                if verbose:
-                    print(f"[AI增强] 质量预测: {quality_prediction['predicted_score']:.3f} ({quality_prediction['quality_level']})")
-                    if quality_prediction['suggestions']:
-                        print(f"[AI增强] 建议: {', '.join(quality_prediction['suggestions'])}")
-
-                # 自适应音频增强
-                if self.audio_enhancer:
-                    enhanced_params = self.audio_enhancer.generate_enhancement_parameters(
-                        text, speaker_id, original_params
-                    )
-                    generation_kwargs.update(enhanced_params)
-                    if verbose and enhanced_params.get('enhancement_metadata', {}).get('enhancement_applied'):
-                        metadata = enhanced_params['enhancement_metadata']
-                        print(f"[AI增强] 检测到情感: {metadata['primary_emotion']} (置信度: {metadata['emotion_confidence']:.2f})")
-                        print(f"[AI增强] 检测到内容类型: {metadata['primary_content']} (置信度: {metadata['content_confidence']:.2f})")
-
-                # 参数学习和优化
-                if self.parameter_learner:
-                    recommended_params = self.parameter_learner.get_recommended_parameters(
-                        speaker_id, generation_kwargs
-                    )
-                    generation_kwargs.update(recommended_params)
-
-            except Exception as e:
-                if verbose:
-                    print(f"[AI增强] 预处理失败: {e}")
-                # 继续使用原始参数
+        if use_emo_text or emo_vector is not None:
+            # we're using a text or emotion vector guidance; so we must remove
+            # "emotion reference voice", to ensure we use correct emotion mixing!
+            emo_audio_prompt = None
 
         if use_emo_text:
-            emo_audio_prompt = None
-            emo_alpha = 1.0
-            # assert emo_audio_prompt is None
-            # assert emo_alpha == 1.0
+            # automatically generate emotion vectors from text prompt
             if emo_text is None:
-                emo_text = text
-
-            if self.qwen_emo is not None:
+                emo_text = text  # use main text prompt
+            
+            # --- FIX: Qwen Inference with Lazy Check ---
+            if self.qwen_emo:
                 emo_dict, content = self.qwen_emo.inference(emo_text)
-                print(emo_dict)
+                print(f"[IndexTTS2] Qwen Raw Output: {content}")
+                
+                # Lazy Check
+                if emo_dict.get("neutral", 0) > 0.6:
+                    print(f"[IndexTTS2] ⚠️  Model output Neutral > 0.6. Checking Keywords...")
+                    keyword_scores, found = self.qwen_emo._fallback_emotion_analysis(text)
+                    if found and keyword_scores.get("neutral", 1.0) < 0.5:
+                         print(f"[IndexTTS2] 🚀 Keywords Overrode Model: {keyword_scores}")
+                         emo_dict = keyword_scores
+                
+                print(f"[IndexTTS2] Final Applied Emotion: {emo_dict}")
                 emo_vector = list(emo_dict.values())
             else:
-                print("⚠️  Emotion model not available, using keyword-based emotion analysis")
-                print(f"⚠️  情感模型不可用，使用关键词匹配分析情感文本")
-                # 使用关键词匹配来分析情感文本
-                if hasattr(self, 'qwen_emo') and self.qwen_emo is not None:
-                    emo_dict = self.qwen_emo._fallback_emotion_analysis(emo_text)
-                else:
-                    # 如果连 qwen_emo 对象都不存在，创建一个临时的备用分析
-                    from indextts.infer_v2 import QwenEmotion
-                    temp_qwen = QwenEmotion.__new__(QwenEmotion)
-                    temp_qwen._initialize_default_attributes()
-                    emo_dict = temp_qwen._fallback_emotion_analysis(emo_text)
-                print(f"[IndexTTS2] 分析结果: {emo_dict}")
+                emo_dict, _ = self.qwen_emo._fallback_emotion_analysis(text)
                 emo_vector = list(emo_dict.values())
 
         if emo_vector is not None:
-            emo_audio_prompt = None
-            emo_alpha = 1.0
-            # assert emo_audio_prompt is None
-            # assert emo_alpha == 1.0
+            # --- FIX: Apply Demo's Normalization Logic ---
+            emo_vector = self.normalize_emo_vec(emo_vector, apply_bias=True)
+            print(f"[IndexTTS2] Normalized Emotion Vector: {emo_vector}")
+            
+            # Original scaling logic
+            emo_vector_scale = max(0.0, min(1.0, emo_alpha))
+            if emo_vector_scale != 1.0:
+                emo_vector = [int(x * emo_vector_scale * 10000) / 10000 for x in emo_vector]
+                print(f"scaled emotion vectors to {emo_vector_scale}x: {emo_vector}")
 
         if emo_audio_prompt is None:
+            # we are not using any external "emotion reference voice"; use
+            # speaker's voice as the main emotion reference audio.
             emo_audio_prompt = spk_audio_prompt
+            # must always use alpha=1.0 when we don't have an external reference voice
             emo_alpha = 1.0
-            # assert emo_alpha == 1.0
 
         # 如果参考音频改变了，才需要重新生成, 提升速度
         if self.cache_spk_cond is None or self.cache_spk_audio_prompt != spk_audio_prompt:
-            audio, sr = librosa.load(spk_audio_prompt)
-            audio = torch.tensor(audio).unsqueeze(0)
-            # 使用高质量重采样器
+            if self.cache_spk_cond is not None:
+                self.cache_spk_cond = None
+                self.cache_s2mel_style = None
+                self.cache_s2mel_prompt = None
+                self.cache_mel = None
+                torch.cuda.empty_cache()
+            audio,sr = self._load_and_cut_audio(spk_audio_prompt,15,verbose)
             audio_22k = self.advanced_resampler.resample(audio, sr, 22050)
             audio_16k = self.advanced_resampler.resample(audio, sr, 16000)
 
@@ -1162,47 +1208,7 @@ class IndexTTS2:
             attention_mask = inputs["attention_mask"]
             input_features = input_features.to(self.device)
             attention_mask = attention_mask.to(self.device)
-
-            # 使用缓存系统提取说话人嵌入
-            if self.speaker_embedding_cache is not None:
-                # 准备元数据
-                metadata = {
-                    'sample_rate': sr,
-                    'audio_path': spk_audio_prompt,
-                    'audio_length': audio_16k.shape[-1]
-                }
-
-                # 使用缓存系统
-                def extract_embedding_func(audio_tensor):
-                    return self.get_emb(input_features, attention_mask)
-
-                spk_cond_emb = self.speaker_embedding_cache.get_or_compute_embedding(
-                    audio_16k, extract_embedding_func, metadata
-                )
-
-                # 应用声音一致性控制
-                if self.voice_consistency_controller is not None:
-                    speaker_id = f"speaker_{hash(spk_audio_prompt) % 10000}"  # 简单的说话人ID
-
-                    # 如果是新说话人，注册参考嵌入
-                    if speaker_id not in self.voice_consistency_controller.speaker_profiles:
-                        self.voice_consistency_controller.register_speaker(speaker_id, spk_cond_emb, metadata)
-
-                    # 应用一致性约束
-                    spk_cond_emb = self.voice_consistency_controller.apply_consistency_constraint(
-                        spk_cond_emb, speaker_id
-                    )
-
-                    # 更新说话人档案
-                    consistency_score = self.voice_consistency_controller.compute_consistency_score(
-                        spk_cond_emb, speaker_id
-                    )
-                    self.voice_consistency_controller.update_speaker_profile(
-                        speaker_id, spk_cond_emb, consistency_score
-                    )
-            else:
-                # 回退到原始方法
-                spk_cond_emb = self.get_emb(input_features, attention_mask)
+            spk_cond_emb = self.get_emb(input_features, attention_mask)
 
             _, S_ref = self.semantic_codec.quantize(spk_cond_emb)
             ref_mel = self.mel_fn(audio_22k.to(spk_cond_emb.device).float())
@@ -1231,59 +1237,30 @@ class IndexTTS2:
             ref_mel = self.cache_mel
 
         if emo_vector is not None:
-            weight_vector = torch.tensor(emo_vector).to(self.device)
-
-            # 验证情感向量的有效性
-            weight_sum = torch.sum(weight_vector)
-
-            if weight_sum <= 0.001:
-                # 设置默认的中性情感
-                weight_vector = torch.zeros_like(weight_vector)
-                weight_vector[7] = 0.2  # Neutral emotion
-            elif weight_sum > 2.0:
-                weight_vector = weight_vector / weight_sum * 1.0  # 归一化到合理范围
-
+            weight_vector = torch.tensor(emo_vector, device=self.device)
+            
             if use_random:
                 random_index = [random.randint(0, x - 1) for x in self.emo_num]
             else:
-                # 验证spk_matrix是否有效
-                if self.spk_matrix is None:
-                    raise RuntimeError("spk_matrix未正确初始化")
-
-                if not isinstance(self.spk_matrix, (list, tuple)):
-                    raise RuntimeError(f"spk_matrix类型错误，期望list/tuple，实际: {type(self.spk_matrix)}")
-
                 random_index = [find_most_similar_cosine(style, tmp) for tmp in self.spk_matrix]
 
-            # 验证索引的有效性，防止索引超出范围
-            validated_indices = []
-            for i, (index, tmp, emo_dim_size) in enumerate(zip(random_index, self.emo_matrix, self.emo_num)):
-                # 确保索引在有效范围内
-                if index >= tmp.shape[0]:
-                    print(f"[IndexTTS2] Warning: emotion index {index} >= matrix size {tmp.shape[0]} for dimension {i}, using 0")
-                    index = 0
-                elif index < 0:
-                    print(f"[IndexTTS2] Warning: emotion index {index} < 0 for dimension {i}, using 0")
-                    index = 0
-                validated_indices.append(index)
-
+            # --- FIX: Matrix Construction ---
             try:
-                emo_matrix = [tmp[index].unsqueeze(0) for index, tmp in zip(validated_indices, self.emo_matrix)]
-                emo_matrix = torch.cat(emo_matrix, 0)
-                emovec_mat = weight_vector.unsqueeze(1) * emo_matrix
-                emovec_mat = torch.sum(emovec_mat, 0)
-                emovec_mat = emovec_mat.unsqueeze(0)
+                selected_emotions = [tmp[index].unsqueeze(0) for index, tmp in zip(random_index, self.emo_matrix)]
+                selected_emotions = torch.cat(selected_emotions, 0)
+                emovec_mat = weight_vector.unsqueeze(1) * selected_emotions
+                emovec_mat = torch.sum(emovec_mat, 0).unsqueeze(0)
             except Exception as e:
-                print(f"[IndexTTS2] Error in emotion matrix processing: {e}")
-                print(f"[IndexTTS2] weight_vector shape: {weight_vector.shape}")
-                print(f"[IndexTTS2] validated_indices: {validated_indices}")
-                print(f"[IndexTTS2] emo_matrix shapes: {[tmp.shape for tmp in self.emo_matrix]}")
-                # 创建一个安全的默认情感矩阵
-                default_emovec = torch.zeros((1, self.emo_matrix[0].shape[1]), device=self.device)
-                emovec_mat = default_emovec
+                print(f"[IndexTTS2] Matrix Error: {e}. Using default.")
+                emovec_mat = torch.zeros((1, self.emo_matrix[0].shape[1]), device=self.device)
+        else:
+            emovec_mat = torch.zeros((1, self.emo_matrix[0].shape[1]), device=self.device)
 
         if self.cache_emo_cond is None or self.cache_emo_audio_prompt != emo_audio_prompt:
-            emo_audio, _ = librosa.load(emo_audio_prompt, sr=16000)
+            if self.cache_emo_cond is not None:
+                self.cache_emo_cond = None
+                torch.cuda.empty_cache()
+            emo_audio, _ = self._load_and_cut_audio(emo_audio_prompt,15,verbose,sr=16000)
             emo_inputs = self.extract_features(emo_audio, sampling_rate=16000, return_tensors="pt")
             emo_input_features = emo_inputs["input_features"]
             emo_attention_mask = emo_inputs["attention_mask"]
@@ -1298,12 +1275,25 @@ class IndexTTS2:
 
         self._set_gr_progress(0.1, "text processing...")
         text_tokens_list = self.tokenizer.tokenize(text)
-        sentences = self.tokenizer.split_sentences(text_tokens_list, max_text_tokens_per_sentence)
+        # --- FIX: Use split_sentences ---
+        if hasattr(self.tokenizer, 'split_segments'):
+             segments = self.tokenizer.split_segments(text_tokens_list, max_text_tokens_per_sentence, quick_streaming_tokens = quick_streaming_tokens)
+        else:
+             segments = self.tokenizer.split_sentences(text_tokens_list, max_text_tokens_per_sentence)
+             
+        segments_count = len(segments)
+
+        text_token_ids = self.tokenizer.convert_tokens_to_ids(text_tokens_list)
+        if self.tokenizer.unk_token_id in text_token_ids:
+            print(f"  >> Warning: input text contains {text_token_ids.count(self.tokenizer.unk_token_id)} unknown tokens (id={self.tokenizer.unk_token_id}):")
+            print( "     Tokens which can't be encoded: ", [t for t, id in zip(text_tokens_list, text_token_ids) if id == self.tokenizer.unk_token_id])
+            print(f"     Consider updating the BPE model or modifying the text to avoid unknown tokens.")
+                  
         if verbose:
             print("text_tokens_list:", text_tokens_list)
-            print("sentences count:", len(sentences))
+            print("segments count:", segments_count)
             print("max_text_tokens_per_sentence:", max_text_tokens_per_sentence)
-            print(*sentences, sep="\n")
+            print(*segments, sep="\n")
         do_sample = generation_kwargs.pop("do_sample", True)
         top_p = generation_kwargs.pop("top_p", 0.8)
         top_k = generation_kwargs.pop("top_k", 30)
@@ -1320,9 +1310,12 @@ class IndexTTS2:
         gpt_forward_time = 0
         s2mel_time = 0
         bigvgan_time = 0
-        progress = 0
         has_warned = False
-        for sent in sentences:
+        silence = None # for stream_return
+        for seg_idx, sent in enumerate(segments):
+            self._set_gr_progress(0.2 + 0.7 * seg_idx / segments_count,
+                                  f"speech synthesis {seg_idx + 1}/{segments_count}...")
+
             text_tokens = self.tokenizer.convert_tokens_to_ids(sent)
             text_tokens = torch.tensor(text_tokens, dtype=torch.int32, device=self.device).unsqueeze(0)
             if verbose:
@@ -1330,7 +1323,7 @@ class IndexTTS2:
                 print(f"text_tokens shape: {text_tokens.shape}, text_tokens type: {text_tokens.dtype}")
                 # debug tokenizer
                 text_token_syms = self.tokenizer.convert_ids_to_tokens(text_tokens[0].tolist())
-                print("text_token_syms is same as sentence tokens", text_token_syms == sent)
+                print("text_token_syms is same as segment tokens", text_token_syms == sent)
 
             m_start_time = time.perf_counter()
             with torch.no_grad():
@@ -1344,23 +1337,12 @@ class IndexTTS2:
                     )
 
                     if emo_vector is not None:
-                        # 确保权重向量的和在合理范围内
-                        weight_sum = torch.sum(weight_vector)
-                        weight_sum = torch.clamp(weight_sum, 0.0, 1.0)  # 限制在[0,1]范围内
-
-                        # 混合情感向量和原始向量
-                        emovec = emovec_mat + (1 - weight_sum) * emovec
-                        # emovec = emovec_mat
-
-                    # 过滤AI增强参数，只保留模型支持的参数
-                    ai_enhancement_params = {
-                        'energy_level', 'naturalness_factor', 'enhancement_metadata',
-                        'clarity_factor', 'pace_factor', 'expression_level', 'voice_consistency'
-                    }
-                    filtered_kwargs = {
-                        k: v for k, v in generation_kwargs.items()
-                        if k not in ai_enhancement_params
-                    }
+                        # --- FIX: Matrix Mixing Logic ---
+                        weight_sum = torch.clamp(torch.sum(weight_vector), 0.0, 1.0)
+                        if weight_sum == 0: weight_sum = 0.8
+                        # Incorporate emo_alpha influence
+                        effective_weight = weight_sum * min(1.0, emo_alpha)
+                        emovec = (1.0 - effective_weight) * emovec + effective_weight * emovec_mat
 
                     codes, speech_conditioning_latent = self.gpt.inference_speech(
                         spk_cond_emb,
@@ -1378,7 +1360,7 @@ class IndexTTS2:
                         num_beams=num_beams,
                         repetition_penalty=repetition_penalty,
                         max_generate_length=max_mel_tokens,
-                        **filtered_kwargs
+                        **generation_kwargs
                     )
 
                 gpt_gen_time += time.perf_counter() - m_start_time
@@ -1386,7 +1368,7 @@ class IndexTTS2:
                     warnings.warn(
                         f"WARN: generation stopped due to exceeding `max_mel_tokens` ({max_mel_tokens}). "
                         f"Input text tokens: {text_tokens.shape[1]}. "
-                        f"Consider reducing `max_text_tokens_per_sentence`({max_text_tokens_per_sentence}) or increasing `max_mel_tokens`.",
+                        f"Consider reducing `max_text_tokens_per_segment`({max_text_tokens_per_sentence}) or increasing `max_mel_tokens`.",
                         category=RuntimeWarning
                     )
                     has_warned = True
@@ -1398,15 +1380,16 @@ class IndexTTS2:
                 #                     print(f"code len: {code_lens}")
 
                 code_lens = []
+                max_code_len = 0
                 for code in codes:
                     if self.stop_mel_token not in code:
-                        code_lens.append(len(code))
                         code_len = len(code)
                     else:
-                        len_ = (code == self.stop_mel_token).nonzero(as_tuple=False)[0] + 1
-                        code_len = len_ - 1
+                        len_ = (code == self.stop_mel_token).nonzero(as_tuple=False)[0]
+                        code_len = len_[0].item() if len_.numel() > 0 else len(code)
                     code_lens.append(code_len)
-                codes = codes[:, :code_len]
+                    max_code_len = max(max_code_len, code_len)
+                codes = codes[:, :max_code_len]
                 code_lens = torch.LongTensor(code_lens)
                 code_lens = code_lens.to(self.device)
                 if verbose:
@@ -1420,11 +1403,11 @@ class IndexTTS2:
                     latent = self.gpt(
                         speech_conditioning_latent,
                         text_tokens,
-                        torch.tensor([text_tokens.shape[-1]], device=text_tokens.device),
+                        torch.tensor([text_tokens.shape[-1]], device=self.device),
                         codes,
-                        torch.tensor([codes.shape[-1]], device=text_tokens.device),
+                        torch.tensor([codes.shape[-1]], device=self.device),
                         emo_cond_emb,
-                        cond_mel_lengths=torch.tensor([spk_cond_emb.shape[-1]], device=text_tokens.device),
+                        cond_mel_lengths=torch.tensor([spk_cond_emb.shape[-1]], device=self.device),
                         emo_cond_mel_lengths=torch.tensor([emo_cond_emb.shape[-1]], device=text_tokens.device),
                         emo_vec=emovec,
                         use_speed=use_speed,
@@ -1438,25 +1421,29 @@ class IndexTTS2:
                     inference_cfg_rate = 0.7
                     latent = self.s2mel.models['gpt_layer'](latent)
                     S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))
-                    S_infer = S_infer.transpose(1, 2)
-                    S_infer = S_infer + latent
-                    target_lengths = (code_lens * 1.72).long()
+                    S_infer = S_infer.transpose(1, 2) + latent
+                    
+                    # === SPEED FIX ===
+                    # 1.72 is base duration. 
+                    # If speed is 1.5, we divide duration by 1.5 to make it shorter (faster).
+                    safe_speed = max(0.1, float(speed)) # Prevent division by zero
+                    target_lengths = (code_lens * (1.72 / safe_speed)).long()
+                    # =================
 
                     cond = self.s2mel.models['length_regulator'](S_infer,
                                                                  ylens=target_lengths,
                                                                  n_quantizers=3,
                                                                  f0=None)[0]
                     cat_condition = torch.cat([prompt_condition, cond], dim=1)
-                    vc_target = self.s2mel.models['cfm'].inference(cat_condition,
-                                                                   torch.LongTensor([cat_condition.size(1)]).to(
-                                                                       cond.device),
-                                                                   ref_mel, style, None, diffusion_steps,
-                                                                   inference_cfg_rate=inference_cfg_rate)
+                    vc_target = self.s2mel.models['cfm'].inference(
+                        cat_condition, torch.LongTensor([cat_condition.size(1)]).to(cond.device),
+                        ref_mel, style, None, 25, inference_cfg_rate=0.7
+                    )
                     vc_target = vc_target[:, :, ref_mel.size(-1):]
-                    s2mel_time += time.perf_counter() - m_start_time
 
                     m_start_time = time.perf_counter()
-                    wav = self.bigvgan(vc_target.float()).squeeze().unsqueeze(0)
+                    # --- FIX: BIGVGAN CPU FORCE ---
+                    wav = self.bigvgan.to("cpu")(vc_target.float().to("cpu")).squeeze().unsqueeze(0)
                     print(wav.shape)
                     bigvgan_time += time.perf_counter() - m_start_time
                     wav = wav.squeeze(1)
@@ -1466,8 +1453,14 @@ class IndexTTS2:
                     print(f"wav shape: {wav.shape}", "min:", wav.min(), "max:", wav.max())
                 # wavs.append(wav[:, :-512])
                 wavs.append(wav.cpu())  # to cpu before saving
+                if stream_return:
+                    yield wav.cpu()
+                    if silence == None:
+                        silence = self.insert_interval_silence([torch.zeros(1, 100)], sampling_rate=sampling_rate, interval_silence=interval_silence)[0]
+                    yield silence
         end_time = time.perf_counter()
-        self._set_gr_progress(0.9, "save audio...")
+
+        self._set_gr_progress(0.9, "saving audio...")
         wavs = self.insert_interval_silence(wavs, sampling_rate=sampling_rate, interval_silence=interval_silence)
         wav = torch.cat(wavs, dim=1)
         wav_length = wav.shape[-1] / sampling_rate
@@ -1481,108 +1474,28 @@ class IndexTTS2:
 
         # save audio
         wav = wav.cpu()  # to cpu
-
-        # 质量监控（第二阶段改进）
+        
         if self.quality_monitor is not None:
-            try:
-                # 对最终音频进行质量评估
-                quality_assessment = self.quality_monitor.assess_quality(wav.float(), sampling_rate)
+             try:
+                 # 对最终音频进行质量评估
+                 quality_assessment = self.quality_monitor.assess_quality(wav.float(), sampling_rate)
 
-                print(f"[IndexTTS2] 🎵 音频质量评估:")
-                print(f"  - 综合质量分数: {quality_assessment['overall_quality']:.3f}")
-                print(f"  - SNR: {quality_assessment['metrics']['snr']:.1f} dB")
-                print(f"  - THD: {quality_assessment['metrics']['thd']:.3f}")
-                print(f"  - 动态范围: {quality_assessment['metrics']['dynamic_range']:.1f} dB")
-                print(f"  - 峰值电平: {quality_assessment['metrics']['peak_level']:.1f} dB")
+                 print(f"[IndexTTS2] 🎵 音频质量评估:")
+                 print(f"  - 综合质量分数: {quality_assessment['overall_quality']:.3f}")
+                 print(f"  - SNR: {quality_assessment['metrics']['snr']:.1f} dB")
+                 print(f"  - THD: {quality_assessment['metrics']['thd']:.3f}")
+                 print(f"  - 动态范围: {quality_assessment['metrics']['dynamic_range']:.1f} dB")
+                 print(f"  - 峰值电平: {quality_assessment['metrics']['peak_level']:.1f} dB")
 
-                if quality_assessment['violations'] > 0:
-                    print(f"  ⚠️  检测到 {quality_assessment['violations']} 项质量问题")
+                 if quality_assessment['violations'] > 0:
+                     print(f"  ⚠️  检测到 {quality_assessment['violations']} 项质量问题")
+                     print(f"  ℹ️ 自动改进功能已禁用，使用原始音频")
+                 else:
+                     print(f"  ✅ 音频质量良好")
 
-                    # 自动改进功能已禁用，使用原始音频
-                    # if quality_assessment['improvement_applied'] and quality_assessment['improved_audio'] is not None:
-                    #     print(f"  🔧 自动质量改进已应用")
-                    #     wav = quality_assessment['improved_audio']
-                    #
-                    #     # 重新评估改进后的音频
-                    #     improved_assessment = self.quality_monitor.assess_quality(wav.float(), sampling_rate)
-                    #     print(f"  📈 改进后质量分数: {improved_assessment['overall_quality']:.3f}")
-                    #     print(f"  📈 改进后违规项: {improved_assessment['violations']}")
-                    print(f"  ℹ️ 自动改进功能已禁用，使用原始音频")
-                else:
-                    print(f"  ✅ 音频质量良好")
-
-            except Exception as e:
-                print(f"[IndexTTS2] ⚠️ 质量监控失败: {e}")
-
-        # AI增强系统后处理和学习
-        if AI_ENHANCED_SYSTEMS_AVAILABLE and self.parameter_learner:
-            try:
-                # 获取最终质量分数
-                final_quality_score = 0.7  # 默认分数
-                if self.quality_monitor is not None:
-                    try:
-                        quality_assessment = self.quality_monitor.assess_quality(wav.float(), sampling_rate)
-                        final_quality_score = quality_assessment['overall_quality']
-                    except:
-                        pass
-
-                # 记录合成会话用于学习
-                if hasattr(self, 'speaker_embedding_cache') and self.speaker_embedding_cache:
-                    # 获取说话人嵌入（如果可用）
-                    try:
-                        # 简化的嵌入获取，实际应该从合成过程中获取
-                        dummy_embedding = torch.randn(1, 256)  # 占位符嵌入
-                        self.parameter_learner.record_synthesis_session(
-                            speaker_id=speaker_id,
-                            embedding=dummy_embedding,
-                            params=generation_kwargs,
-                            quality_score=final_quality_score
-                        )
-                    except Exception as e:
-                        if verbose:
-                            print(f"[AI增强] 记录会话失败: {e}")
-
-                # 更新质量预测准确性
-                if quality_prediction and self.quality_predictor:
-                    try:
-                        predicted_score = quality_prediction['predicted_score']
-                        self.quality_predictor.update_prediction_accuracy(predicted_score, final_quality_score)
-
-                        if verbose:
-                            prediction_error = abs(predicted_score - final_quality_score)
-                            print(f"[AI增强] 预测准确性: 预测={predicted_score:.3f}, 实际={final_quality_score:.3f}, 误差={prediction_error:.3f}")
-                    except Exception as e:
-                        if verbose:
-                            print(f"[AI增强] 更新预测准确性失败: {e}")
-
-                # 评估增强效果
-                if self.audio_enhancer and 'enhancement_metadata' in generation_kwargs:
-                    try:
-                        # 估算原始质量（简化）
-                        original_quality_estimate = final_quality_score * 0.9  # 假设增强有10%提升
-                        self.audio_enhancer.evaluate_enhancement_effectiveness(
-                            original_quality_estimate,
-                            final_quality_score,
-                            generation_kwargs['enhancement_metadata']
-                        )
-                    except Exception as e:
-                        if verbose:
-                            print(f"[AI增强] 评估增强效果失败: {e}")
-
-                # 定期保存学习数据
-                if hasattr(self.parameter_learner, 'stats') and self.parameter_learner.stats['total_learning_sessions'] % 50 == 0:
-                    try:
-                        self.parameter_learner.save_all_data()
-                        if verbose:
-                            print("[AI增强] 学习数据已保存")
-                    except Exception as e:
-                        if verbose:
-                            print(f"[AI增强] 保存学习数据失败: {e}")
-
-            except Exception as e:
-                if verbose:
-                    print(f"[AI增强] 后处理失败: {e}")
-
+             except Exception as e:
+                 print(f"[IndexTTS2] ⚠️ 质量监控失败: {e}")
+        
         if output_path:
             # 直接保存音频到指定路径中
             if os.path.isfile(output_path):
@@ -1592,85 +1505,16 @@ class IndexTTS2:
                 os.makedirs(os.path.dirname(output_path), exist_ok=True)
             torchaudio.save(output_path, wav.type(torch.int16), sampling_rate)
             print(">> wav file saved to:", output_path)
-            return output_path
+            if stream_return:
+                return None
+            yield output_path
         else:
+            if stream_return:
+                return None
             # 返回以符合Gradio的格式要求
             wav_data = wav.type(torch.int16)
             wav_data = wav_data.numpy().T
-            return (sampling_rate, wav_data)
-
-    def get_advanced_systems_stats(self):
-        """获取高级音频系统统计信息"""
-        stats = {}
-
-        if self.speaker_embedding_cache is not None:
-            stats['speaker_cache'] = self.speaker_embedding_cache.get_cache_stats()
-
-        if self.voice_consistency_controller is not None:
-            stats['voice_consistency'] = self.voice_consistency_controller.get_consistency_stats()
-
-        if self.quality_monitor is not None:
-            stats['quality_monitor'] = self.quality_monitor.get_quality_stats()
-
-        # AI增强系统统计
-        if AI_ENHANCED_SYSTEMS_AVAILABLE:
-            if self.parameter_learner is not None:
-                stats['parameter_learner'] = self.parameter_learner.get_learning_stats()
-
-            if self.audio_enhancer is not None:
-                stats['audio_enhancer'] = self.audio_enhancer.get_enhancement_stats()
-
-            if self.quality_predictor is not None:
-                stats['quality_predictor'] = self.quality_predictor.get_prediction_stats()
-
-            if self.adaptive_cache_strategy is not None:
-                stats['adaptive_cache_strategy'] = self.adaptive_cache_strategy.get_adaptation_stats()
-
-        return stats
-
-    def print_advanced_systems_summary(self):
-        """打印高级音频系统摘要"""
-        if not ADVANCED_SYSTEMS_AVAILABLE:
-            print("[IndexTTS2] 高级音频系统不可用")
-            return
-
-        stats = self.get_advanced_systems_stats()
-
-        print("\n" + "="*60)
-        print("[IndexTTS2] 🚀 高级音频系统统计摘要")
-        print("="*60)
-
-        # 说话人嵌入缓存统计
-        if 'speaker_cache' in stats:
-            cache_stats = stats['speaker_cache']
-            print(f"📦 说话人嵌入缓存:")
-            print(f"  - 缓存大小: {cache_stats['cache_size']}/{cache_stats['max_cache_size']}")
-            print(f"  - 命中率: {cache_stats['hit_rate']:.1f}%")
-            print(f"  - 总请求: {cache_stats['total_requests']}")
-            print(f"  - 融合操作: {cache_stats['fusion_operations']}")
-            print(f"  - 相似性匹配: {cache_stats['similarity_matches']}")
-
-        # 声音一致性控制统计
-        if 'voice_consistency' in stats:
-            consistency_stats = stats['voice_consistency']
-            print(f"🎭 声音一致性控制:")
-            print(f"  - 注册说话人: {consistency_stats['speaker_count']}")
-            print(f"  - 平均一致性: {consistency_stats['global_stats']['average_consistency']:.3f}")
-            print(f"  - 违规率: {consistency_stats['violation_rate']:.1f}%")
-            print(f"  - 应用修正: {consistency_stats['global_stats']['corrections_applied']}")
-
-        # 质量监控统计
-        if 'quality_monitor' in stats:
-            quality_stats = stats['quality_monitor']
-            if 'stats' in quality_stats:
-                print(f"🎵 音频质量监控:")
-                print(f"  - 评估次数: {quality_stats['stats']['total_assessments']}")
-                print(f"  - 违规率: {quality_stats['violation_rate']:.1f}%")
-                print(f"  - 平均质量: {quality_stats['average_quality']:.3f}")
-                print(f"  - 阈值调整: {quality_stats['stats']['threshold_adaptations']}")
-
-        print("="*60)
-
+            yield (sampling_rate, wav_data)
 
 def find_most_similar_cosine(query_vector, matrix):
     try:
@@ -1709,569 +1553,151 @@ def find_most_similar_cosine(query_vector, matrix):
 
 class QwenEmotion:
     def __init__(self, model_dir):
-        # 首先设置所有必要的属性，确保即使初始化失败也不会出现AttributeError
         self.model_dir = model_dir
-        self.model = None
-        self.tokenizer = None
-        self.is_available = False
-
-        # 设置默认属性
+        self.model = None; self.tokenizer = None; self.is_available = False
         self._initialize_default_attributes()
-
-        # 智能加载策略：先检查transformers版本兼容性
-        # Smart loading strategy: check transformers version compatibility first
-        print(f"[IndexTTS2] 尝试加载Qwen情感模型: {model_dir}")
-        print(f"[IndexTTS2] Attempting to load Qwen emotion model: {model_dir}")
-
-        # 检查是否应该跳过初始模型加载
-        should_skip_initial_load = self._should_skip_initial_model_load(model_dir)
-
-        if should_skip_initial_load:
-            print(f"[IndexTTS2] 🔄 检测到版本兼容性问题，直接使用备用方案")
-            print(f"[IndexTTS2] 🔄 Version compatibility issue detected, using fallback directly")
-            # 不抛出异常，而是直接跳到备用方案
-            self._handle_fallback_loading()
-            return
-
+        
         try:
-            # 直接尝试加载，让transformers自己处理兼容性
             if os.path.exists(model_dir):
-                # 本地路径，使用local_files_only=True
-                print(f"[IndexTTS2] 从本地路径加载模型...")
-                print(f"[IndexTTS2] Loading model from local path...")
-
-                self.tokenizer = AutoTokenizer.from_pretrained(
-                    self.model_dir,
-                    local_files_only=True,
-                    trust_remote_code=True
-                )
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    self.model_dir,
-                    torch_dtype="float16",
-                    device_map="auto",
-                    local_files_only=True,
-                    trust_remote_code=True
-                )
+                self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir, local_files_only=True, trust_remote_code=True)
+                # --- FIX: FORCE FLOAT32 FOR MAC CPU ---
+                self.model = AutoModelForCausalLM.from_pretrained(self.model_dir, torch_dtype=torch.float32, device_map="auto", local_files_only=True, trust_remote_code=True)
             else:
-                # 远程repo，正常加载
-                print(f"[IndexTTS2] 从远程仓库加载模型...")
-                print(f"[IndexTTS2] Loading model from remote repository...")
-
-                self.tokenizer = AutoTokenizer.from_pretrained(
-                    self.model_dir,
-                    trust_remote_code=True
-                )
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    self.model_dir,
-                    torch_dtype="float16",
-                    device_map="auto",
-                    trust_remote_code=True
-                )
-
+                self.tokenizer = AutoTokenizer.from_pretrained(self.model_dir, trust_remote_code=True)
+                self.model = AutoModelForCausalLM.from_pretrained(self.model_dir, torch_dtype=torch.float32, device_map="auto", trust_remote_code=True)
             self.is_available = True
-            print(f"[IndexTTS2] ✅ Qwen情感模型加载成功！")
-            print(f"[IndexTTS2] ✅ Qwen emotion model loaded successfully!")
-
+            print(f"[IndexTTS2] ✅ Qwen emotion model loaded (Float32)!")
         except Exception as e:
-            # 任何加载失败都使用备用方案，不管具体原因
-            print(f"[IndexTTS2] ⚠️  Qwen情感模型加载失败: {e}")
-            print(f"[IndexTTS2] ⚠️  Failed to load Qwen emotion model: {e}")
-
-            # 提供具体的错误分析和建议
-            self._analyze_loading_error(e)
-
-            print(f"[IndexTTS2] 🔄 将使用备用情感分析方法")
-            print(f"[IndexTTS2] 🔄 Will use fallback emotion analysis method")
-
-            # 尝试智能备用方案：根据transformers版本加载兼容的Qwen模型
-            print(f"[IndexTTS2] 🔄 尝试智能备用方案...")
-            print(f"[IndexTTS2] 🔄 Trying intelligent fallback...")
-
-            fallback_success = self._try_fallback_qwen_models()
-
-            if not fallback_success:
-                print(f"[IndexTTS2] 🔄 所有Qwen模型都无法加载，使用关键词匹配备用方案")
-                print(f"[IndexTTS2] 🔄 All Qwen models failed to load, using keyword matching fallback")
-                self.is_available = False
-                self.model = None
-                self.tokenizer = None
+            print(f"[IndexTTS2] ⚠️  Qwen load failed: {e}")
 
     def _initialize_default_attributes(self):
-        """初始化默认属性，确保所有方法都能正常调用"""
-        # 设置情感分析相关的默认属性
-        self.prompt = """你是一个情感分析专家。请分析以下文本的情感，并给出8个维度的情感分数（0-1之间的浮点数）：
-        happy（开心）、angry（愤怒）、sad（悲伤）、fear（恐惧）、hate（厌恶）、low（低落）、surprise（惊讶）、neutral（中性）。
-
-        请直接返回JSON格式的结果，例如：
-        {"happy": 0.8, "angry": 0.0, "sad": 0.1, "fear": 0.0, "hate": 0.0, "low": 0.0, "surprise": 0.1, "neutral": 0.0}
-
-        文本："""
-
-        # 设置备用情感字典
-        self.backup_dict = {
-            "happy": 0, "angry": 0, "sad": 0, "fear": 0,
-            "hate": 0, "low": 0, "surprise": 0, "neutral": 1.0
+        self.prompt = "文本情感分类"
+        self.cn_key_to_en = {
+            "高兴": "happy", "愤怒": "angry", "悲伤": "sad", "恐惧": "afraid",
+            "反感": "disgusted", "低落": "melancholic", "惊讶": "surprised", "自然": "calm",
+            "anger": "angry", # Fix typo
         }
+        self.desired_vector_order = ["高兴", "愤怒", "悲伤", "恐惧", "反感", "低落", "惊讶", "自然"]
+        self.melancholic_words = {"低落", "melancholy", "melancholic", "depression", "depressed", "gloomy", "overwhelmed", "worried", "tired", "exhausted"}
+        self.convert_dict = self.cn_key_to_en
+        self.backup_dict = {"happy": 0, "angry": 0, "sad": 0, "fear": 0, "hate": 0, "low": 0, "surprise": 0, "neutral": 1.0}
+        self.min_score = 0.0; self.max_score = 1.2
 
-        # 设置分数范围
-        self.max_score = 1.2
-        self.min_score = 0.0
-        # 设置转换字典
-        self.convert_dict = {
-            "愤怒": "angry",
-            "高兴": "happy",
-            "恐惧": "fear",
-            "反感": "hate",
-            "悲伤": "sad",
-            "低落": "low",
-            "惊讶": "surprise",
-            "自然": "neutral",
-        }
-
-    def _analyze_loading_error(self, error):
-        """分析加载错误并提供具体的解决建议"""
-        error_str = str(error).lower()
-
-        if "qwen3" in error_str and "transformers does not recognize" in error_str:
-            print(f"[IndexTTS2] 💡 错误分析: Qwen3模型需要更新的transformers版本")
-            print(f"[IndexTTS2] 💡 Error analysis: Qwen3 model requires newer transformers version")
-            print(f"[IndexTTS2] 🔧 建议解决方案:")
-            print(f"[IndexTTS2] 🔧 Suggested solutions:")
-            print(f"[IndexTTS2]    1. 升级transformers: pip install --upgrade transformers")
-            print(f"[IndexTTS2]    2. 或安装开发版本: pip install git+https://github.com/huggingface/transformers.git")
-            print(f"[IndexTTS2]    3. 当前将尝试使用兼容的备用模型")
-        elif "keyerror" in error_str:
-            print(f"[IndexTTS2] 💡 错误分析: 模型架构不被当前transformers版本支持")
-            print(f"[IndexTTS2] 💡 Error analysis: Model architecture not supported by current transformers version")
-        elif "no module named" in error_str:
-            print(f"[IndexTTS2] 💡 错误分析: 缺少必要的依赖包")
-            print(f"[IndexTTS2] 💡 Error analysis: Missing required dependencies")
-        elif "out of memory" in error_str or "cuda out of memory" in error_str:
-            print(f"[IndexTTS2] 💡 错误分析: GPU内存不足")
-            print(f"[IndexTTS2] 💡 Error analysis: Insufficient GPU memory")
-            print(f"[IndexTTS2] 🔧 建议: 将尝试使用更小的模型")
-        else:
-            print(f"[IndexTTS2] 💡 错误分析: 通用加载错误，将尝试备用方案")
-            print(f"[IndexTTS2] 💡 Error analysis: General loading error, trying fallback options")
-
-    def _should_skip_initial_model_load(self, model_dir):
-        """
-        检查是否应该跳过初始模型加载
-        基于模型路径和transformers版本进行智能判断
-        """
-        try:
-            import transformers
-            from packaging import version
-
-            current_ver = version.parse(transformers.__version__)
-            print(f"[IndexTTS2] 检查版本兼容性 - transformers: {transformers.__version__}")
-            print(f"[IndexTTS2] Checking version compatibility - transformers: {transformers.__version__}")
-
-            # 检查模型路径中是否包含已知的版本敏感关键词
-            model_path_lower = model_dir.lower()
-
-            # Qwen3相关模型需要transformers >= 4.51.0
-            if any(keyword in model_path_lower for keyword in ['qwen3', 'qwen-3', 'qwen_3']):
-                if current_ver < version.parse("4.51.0"):
-                    print(f"[IndexTTS2] ⚠️  检测到Qwen3模型，但transformers版本 {transformers.__version__} < 4.51.0")
-                    print(f"[IndexTTS2] ⚠️  Detected Qwen3 model, but transformers version {transformers.__version__} < 4.51.0")
-                    return True
-
-            # 检查配置文件中的特定模型名称
-            if 'qwen0.6bemo4-merge' in model_path_lower:
-                # 这个模型很可能是Qwen3架构，需要更新的transformers
-                # 对于4.49.0+版本，我们可以尝试加载，但仍然准备备用方案
-                if current_ver < version.parse("4.49.0"):
-                    print(f"[IndexTTS2] ⚠️  检测到qwen0.6bemo4-merge模型，transformers版本 {transformers.__version__} 可能不兼容")
-                    print(f"[IndexTTS2] ⚠️  Detected qwen0.6bemo4-merge model, transformers version {transformers.__version__} may not be compatible")
-                    return True
-                else:
-                    print(f"[IndexTTS2] 💡 transformers版本 {transformers.__version__} >= 4.49.0，尝试加载qwen0.6bemo4-merge模型")
-                    print(f"[IndexTTS2] 💡 transformers version {transformers.__version__} >= 4.49.0, attempting to load qwen0.6bemo4-merge model")
-
-            return False
-
-        except Exception as e:
-            print(f"[IndexTTS2] ⚠️  版本兼容性检查失败: {e}")
-            print(f"[IndexTTS2] ⚠️  Version compatibility check failed: {e}")
-            return False
-
-    def _handle_fallback_loading(self):
-        """处理备用加载逻辑"""
-        print(f"[IndexTTS2] 🔄 将使用备用情感分析方法")
-        print(f"[IndexTTS2] 🔄 Will use fallback emotion analysis method")
-
-        # 尝试智能备用方案：根据transformers版本加载兼容的Qwen模型
-        print(f"[IndexTTS2] 🔄 尝试智能备用方案...")
-        print(f"[IndexTTS2] 🔄 Trying intelligent fallback...")
-
-        fallback_success = self._try_fallback_qwen_models()
-
-        if not fallback_success:
-            print(f"[IndexTTS2] 🔄 所有Qwen模型都无法加载，使用关键词匹配备用方案")
-            print(f"[IndexTTS2] 🔄 All Qwen models failed to load, using keyword matching fallback")
-            self.is_available = False
-            self.model = None
-            self.tokenizer = None
-
-    def _get_compatible_qwen_models(self):
-        """根据transformers版本获取兼容的Qwen模型列表"""
-        try:
-            import transformers
-            from packaging import version
-
-            current_ver = version.parse(transformers.__version__)
-            print(f"[IndexTTS2] 检测transformers版本: {transformers.__version__}")
-            print(f"[IndexTTS2] Detecting transformers version: {transformers.__version__}")
-
-            # 定义不同Qwen模型的版本要求和优先级
-            qwen_models = []
-
-            # Qwen3系列 (需要transformers >= 4.51.0)
-            if current_ver >= version.parse("4.51.0"):
-                qwen_models.extend([
-                    {
-                        "name": "Qwen3-0.5B-Instruct",
-                        "model_id": "Qwen/Qwen3-0.5B-Instruct",
-                        "priority": 1,
-                        "size": "0.5B",
-                        "description": "最新Qwen3模型，小型高效"
-                    },
-                    {
-                        "name": "Qwen3-1.8B-Instruct",
-                        "model_id": "Qwen/Qwen3-1.8B-Instruct",
-                        "priority": 2,
-                        "size": "1.8B",
-                        "description": "Qwen3中型模型"
-                    }
-                ])
-
-            # Qwen2.5系列 (需要transformers >= 4.37.0)
-            if current_ver >= version.parse("4.37.0"):
-                qwen_models.extend([
-                    {
-                        "name": "Qwen2.5-0.5B-Instruct",
-                        "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
-                        "priority": 3,
-                        "size": "0.5B",
-                        "description": "Qwen2.5小型模型"
-                    },
-                    {
-                        "name": "Qwen2.5-1.5B-Instruct",
-                        "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
-                        "priority": 4,
-                        "size": "1.5B",
-                        "description": "Qwen2.5中型模型"
-                    }
-                ])
-
-            # Qwen2系列 (需要transformers >= 4.37.0)
-            if current_ver >= version.parse("4.37.0"):
-                qwen_models.extend([
-                    {
-                        "name": "Qwen2-0.5B-Instruct",
-                        "model_id": "Qwen/Qwen2-0.5B-Instruct",
-                        "priority": 5,
-                        "size": "0.5B",
-                        "description": "Qwen2小型模型"
-                    },
-                    {
-                        "name": "Qwen2-1.5B-Instruct",
-                        "model_id": "Qwen/Qwen2-1.5B-Instruct",
-                        "priority": 6,
-                        "size": "1.5B",
-                        "description": "Qwen2中型模型"
-                    }
-                ])
-
-            # Qwen1.5系列 (需要transformers >= 4.37.0)
-            if current_ver >= version.parse("4.37.0"):
-                qwen_models.extend([
-                    {
-                        "name": "Qwen1.5-0.5B-Chat",
-                        "model_id": "Qwen/Qwen1.5-0.5B-Chat",
-                        "priority": 7,
-                        "size": "0.5B",
-                        "description": "Qwen1.5小型模型"
-                    },
-                    {
-                        "name": "Qwen1.5-1.8B-Chat",
-                        "model_id": "Qwen/Qwen1.5-1.8B-Chat",
-                        "priority": 8,
-                        "size": "1.8B",
-                        "description": "Qwen1.5中型模型"
-                    }
-                ])
-
-            # 按优先级排序
-            qwen_models.sort(key=lambda x: x["priority"])
-
-            print(f"[IndexTTS2] 找到 {len(qwen_models)} 个兼容的Qwen模型")
-            print(f"[IndexTTS2] Found {len(qwen_models)} compatible Qwen models")
-
-            return qwen_models
-
-        except Exception as e:
-            print(f"[IndexTTS2] ⚠️  获取兼容模型列表失败: {e}")
-            print(f"[IndexTTS2] ⚠️  Failed to get compatible model list: {e}")
-            return []
-
-    def _try_fallback_qwen_models(self):
-        """尝试加载备用Qwen模型"""
-        compatible_models = self._get_compatible_qwen_models()
-
-        if not compatible_models:
-            print(f"[IndexTTS2] ⚠️  没有找到兼容的Qwen模型")
-            print(f"[IndexTTS2] ⚠️  No compatible Qwen models found")
-            return False
-
-        for model_info in compatible_models:
-            try:
-                print(f"[IndexTTS2] 🔄 尝试加载备用模型: {model_info['name']} ({model_info['size']})")
-                print(f"[IndexTTS2] 🔄 Trying fallback model: {model_info['name']} ({model_info['size']})")
-                print(f"[IndexTTS2] 📝 模型描述: {model_info['description']}")
-                print(f"[IndexTTS2] 📝 Model description: {model_info['description']}")
-
-                # 尝试加载备用模型
-                self.tokenizer = AutoTokenizer.from_pretrained(
-                    model_info['model_id'],
-                    trust_remote_code=True
-                )
-
-                self.model = AutoModelForCausalLM.from_pretrained(
-                    model_info['model_id'],
-                    torch_dtype="float16",
-                    device_map="auto",
-                    trust_remote_code=True
-                )
-
-                self.is_available = True
-                self.fallback_model_info = model_info
-
-                print(f"[IndexTTS2] ✅ 备用模型加载成功: {model_info['name']}")
-                print(f"[IndexTTS2] ✅ Fallback model loaded successfully: {model_info['name']}")
-                print(f"[IndexTTS2] 💡 使用 {model_info['size']} 参数的 {model_info['name']} 进行情感分析")
-                print(f"[IndexTTS2] 💡 Using {model_info['size']} parameter {model_info['name']} for emotion analysis")
-
-                return True
-
-            except Exception as e:
-                print(f"[IndexTTS2] ⚠️  备用模型 {model_info['name']} 加载失败: {e}")
-                print(f"[IndexTTS2] ⚠️  Fallback model {model_info['name']} failed to load: {e}")
-                continue
-
-        print(f"[IndexTTS2] ❌ 所有备用Qwen模型都加载失败")
-        print(f"[IndexTTS2] ❌ All fallback Qwen models failed to load")
-        return False
+    def clamp_score(self, value):
+        return max(self.min_score, min(self.max_score, value))
 
     def convert(self, content):
-        content = content.replace("\n", " ")
-        content = content.replace(" ", "")
-        content = content.replace("{", "")
-        content = content.replace("}", "")
-        content = content.replace('"', "")
-        parts = content.strip().split(',')
-        print(parts)
-        parts_dict = {}
-        desired_order = ["高兴", "愤怒", "悲伤", "恐惧", "反感", "低落", "惊讶", "自然"]
-        for part in parts:
-            key_value = part.strip().split(':')
-            if len(key_value) == 2:
-                parts_dict[key_value[0].strip()] = part
-        # 按照期望顺序重新排列
-        ordered_parts = [parts_dict[key] for key in desired_order if key in parts_dict]
-        parts = ordered_parts
-        if len(parts) != len(self.convert_dict):
-            return self.backup_dict
-
+        import re
+        # --- FIX: Robust Regex Parsing ---
+        pattern = r'["\']?([a-zA-Z\u4e00-\u9fa5]+)["\']?\s*[:=]\s*([0-9.]+)'
+        parsed_data = {}
+        for match in re.finditer(pattern, str(content)):
+            try: parsed_data[match.group(1)] = float(match.group(2))
+            except: continue
+        
         emotion_dict = {}
-        for part in parts:
-            key_value = part.strip().split(':')
-            if len(key_value) == 2:
-                try:
-                    key = self.convert_dict[key_value[0].strip()]
-                    value = float(key_value[1].strip())
-                    value = max(self.min_score, min(self.max_score, value))
-                    emotion_dict[key] = value
-                except Exception:
-                    continue
+        en_keys = set(self.cn_key_to_en.values())
+        legacy_map = {"neutral": "calm", "fear": "afraid", "hate": "disgust", "low": "melancholic", "surprise": "surprised"}
 
-        for key in self.backup_dict:
-            if key not in emotion_dict:
-                emotion_dict[key] = 0.0
+        for raw_key, val in parsed_data.items():
+            target_key = None
+            if raw_key in self.cn_key_to_en: target_key = self.cn_key_to_en[raw_key]
+            elif raw_key in en_keys: target_key = raw_key
+            elif raw_key in legacy_map: target_key = legacy_map[raw_key]
+            
+            if target_key: emotion_dict[target_key] = self.clamp_score(val)
 
-        if sum(emotion_dict.values()) <= 0:
-            return self.backup_dict
-
-        return emotion_dict
+        # Ensure all keys present and map back to Comfy expected keys
+        final_comfy_dict = {
+            "happy": emotion_dict.get("happy", 0.0),
+            "angry": emotion_dict.get("angry", 0.0),
+            "sad": emotion_dict.get("sad", 0.0),
+            "fear": emotion_dict.get("afraid", 0.0), # Map back internal 'afraid' to 'fear'
+            "hate": emotion_dict.get("disgust", 0.0), # Map back internal 'disgust' to 'hate'
+            "low": emotion_dict.get("melancholic", 0.0), # Map back internal 'melancholic' to 'low'
+            "surprise": emotion_dict.get("surprised", 0.0),
+            "neutral": emotion_dict.get("calm", 0.0)
+        }
+        
+        # If empty, default to neutral
+        if all(v <= 0 for v in final_comfy_dict.values()):
+             final_comfy_dict["neutral"] = 1.0
+             
+        return final_comfy_dict
 
     def inference(self, text_input):
-        """
-        进行情感推理
-        如果模型不可用，返回备用情感字典
-        """
-        # 检查模型是否可用
-        if not self.is_available or self.model is None or self.tokenizer is None:
-            print(f"[IndexTTS2] ⚠️  Qwen emotion model not available, using keyword-based fallback")
-            print(f"[IndexTTS2] ⚠️  Qwen情感模型不可用，使用关键词匹配备用方案")
-
-            # 使用简单的关键词匹配作为备用方案
-            fallback_emotion = self._fallback_emotion_analysis(text_input)
-            return fallback_emotion, f"Keyword fallback for: {text_input[:50]}..."
-
-        # 显示使用的模型信息
-        if hasattr(self, 'fallback_model_info'):
-            model_info = self.fallback_model_info
-            print(f"[IndexTTS2] 🤖 使用备用模型进行情感分析: {model_info['name']} ({model_info['size']})")
-            print(f"[IndexTTS2] 🤖 Using fallback model for emotion analysis: {model_info['name']} ({model_info['size']})")
-        else:
-            print(f"[IndexTTS2] 🤖 使用原始Qwen模型进行情感分析")
-            print(f"[IndexTTS2] 🤖 Using original Qwen model for emotion analysis")
+        if not self.is_available or self.model is None:
+            return self._fallback_emotion_analysis(text_input)[0], "Fallback"
 
         try:
-            start = time.time()
-            messages = [
-                {"role": "system", "content": f"{self.prompt}"},
-                {"role": "user", "content": f"{text_input}"}
-            ]
-            text = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )
-            model_inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
-
-            # conduct text completion
-            generated_ids = self.model.generate(
-                **model_inputs,
-                max_new_tokens=32768,
-                pad_token_id=self.tokenizer.eos_token_id
+            # --- FIX: Prompt Strategy ---
+            messages = [{"role": "system", "content": f"{self.prompt}"}, {"role": "user", "content": f"{text_input}"}]
+            text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+            
+            # --- FIX: CPU PATCH + DO_SAMPLE=TRUE ---
+            model_inputs = self.tokenizer([text], return_tensors="pt").to("cpu")
+            generated_ids = self.model.to("cpu").generate(
+                **model_inputs, max_new_tokens=512, pad_token_id=self.tokenizer.eos_token_id, do_sample=True
             )
             output_ids = generated_ids[0][len(model_inputs.input_ids[0]):].tolist()
+            try: index = len(output_ids) - output_ids[::-1].index(151668)
+            except: index = 0
+            
+            content = self.tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip()
+            print(f"[IndexTTS2] Qwen Raw Output: {content}")
+            
+            content_dict = self.convert(content)
+            
+            # --- FIX: Lazy Check ---
+            if content_dict.get("neutral", 0) > 0.6:
+                print(f"[IndexTTS2] ⚠️  Model output Neutral > 0.6. Checking Keywords...")
+                keyword_scores, found = self._fallback_emotion_analysis(text_input)
+                if found and keyword_scores.get("neutral", 1.0) < 0.5:
+                     print(f"[IndexTTS2] 🚀 Keywords Overrode Model: {keyword_scores}")
+                     content_dict = keyword_scores
 
-            # parsing thinking content
-            try:
-                # rindex finding 151668 (</think>)
-                index = len(output_ids) - output_ids[::-1].index(151668)
-            except ValueError:
-                index = 0
+            # Melancholy Fix
+            text_input_lower = text_input.lower()
+            if any(word in text_input_lower for word in self.melancholic_words):
+                print("[IndexTTS2] Applying Melancholy Fix")
+                sad_score = content_dict.get("sad", 0.0)
+                low_score = content_dict.get("low", 0.0)
+                content_dict["low"] = max(sad_score, low_score, 0.8) 
+                content_dict["sad"] = 0.0
 
-            content = self.tokenizer.decode(output_ids[index:], skip_special_tokens=True).strip("\n")
-            emotion_dict = self.convert(content)
-            return emotion_dict, content
+            return content_dict, content
 
         except Exception as e:
-            print(f"[IndexTTS2] ⚠️  Qwen emotion inference failed: {e}")
-            print(f"[IndexTTS2] ⚠️  Qwen情感推理失败，使用备用分析")
-
-            # 发生错误时使用备用方案
-            fallback_emotion = self._fallback_emotion_analysis(text_input)
-            return fallback_emotion, f"Error fallback for: {text_input[:50]}..."
+            print(f"[IndexTTS2] ⚠️ Inference failed: {e}")
+            return self._fallback_emotion_analysis(text_input)[0], str(e)
 
     def _fallback_emotion_analysis(self, text_input):
-        """
-        增强的备用情感分析方法
-        使用更智能的关键词匹配和语义分析来分析情感
-        Enhanced fallback emotion analysis method using smarter keyword matching and semantic analysis
-        """
-        print(f"[IndexTTS2] 🔍 使用增强关键词匹配进行情感分析")
-        print(f"[IndexTTS2] 🔍 Using enhanced keyword matching for emotion analysis")
-
         text_lower = text_input.lower()
-
-        # 定义更全面的情感关键词库，包含权重
         emotion_keywords = {
-            "happy": {
-                "high": ["太好了", "超开心", "非常高兴", "特别兴奋", "狂欢", "欣喜若狂"],
-                "medium": ["开心", "高兴", "快乐", "兴奋", "愉快", "欢乐", "喜悦", "好棒", "棒极了"],
-                "low": ["哈哈", "笑", "呵呵", "嘿嘿", "不错", "挺好"]
-            },
-            "angry": {
-                "high": ["气死了", "愤怒至极", "火冒三丈", "暴怒", "狂怒"],
-                "medium": ["生气", "愤怒", "气愤", "恼火", "烦躁", "愤慨", "火大"],
-                "low": ["讨厌", "烦", "怒", "不爽", "郁闷"]
-            },
-            "sad": {
-                "high": ["心痛", "痛不欲生", "悲痛欲绝", "绝望", "崩溃"],
-                "medium": ["伤心", "难过", "悲伤", "沮丧", "失望", "痛苦", "难受"],
-                "low": ["哭", "眼泪", "唉", "可惜", "遗憾"]
-            },
-            "fear": {
-                "high": ["恐怖", "惊慌失措", "吓死了", "恐惧至极"],
-                "medium": ["害怕", "恐惧", "担心", "紧张", "焦虑", "不安", "惊慌"],
-                "low": ["可怕", "吓", "担忧", "忧虑", "不放心"]
-            },
-            "hate": {
-                "high": ["憎恨", "厌恶至极", "深恶痛绝", "恨死了"],
-                "medium": ["讨厌", "厌恶", "反感", "恶心", "嫌弃", "受不了"],
-                "low": ["烦人", "不喜欢", "反对", "拒绝"]
-            },
-            "low": {
-                "high": ["消沉", "颓废", "绝望", "无助", "空虚"],
-                "medium": ["低落", "郁闷", "无聊", "疲惫", "没劲", "无力"],
-                "low": ["累", "懒", "困", "倦", "乏"]
-            },
-            "surprise": {
-                "high": ["震惊", "惊呆了", "不敢相信", "太意外了"],
-                "medium": ["惊讶", "意外", "吃惊", "惊奇", "想不到"],
-                "low": ["天哪", "哇", "真的吗", "是吗", "咦"]
-            },
-            "neutral": {
-                "high": ["明白了", "了解了", "知道了"],
-                "medium": ["好的", "明白", "了解", "是的", "对"],
-                "low": ["嗯", "哦", "这样", "那样", "好吧"]
-            }
+            "happy": ["happy", "excited", "glad", "joy", "great", "love", "高兴", "开心", "太棒"],
+            "angry": ["angry", "mad", "hate", "stupid", "damn", "wrong", "fault", "blame", "生气", "愤怒", "滚", "不对", "检讨", "讨厌"],
+            "sad": ["sad", "crying", "sorry", "miss", "难过", "悲伤", "哭", "遗憾"],
+            "fear": ["scared", "fear", "afraid", "help", "worried", "worry", "害怕", "恐惧", "担心", "救命"],
+            "hate": ["hate", "disgust", "sick", "repulsive", "反感", "恶心", "恨"],
+            "low": ["tired", "exhausted", "overwhelmed", "depressed", "gloomy", "sigh", "累", "低落", "郁闷", "无助", "唉"],
+            "surprise": ["wow", "shock", "surprise", "really", "what", "惊讶", "震惊", "真的"],
+            "neutral": ["okay", "fine", "normal", "hello", "yes", "no", "还好"]
         }
-
-        # 权重设置
-        weight_map = {"high": 3.0, "medium": 2.0, "low": 1.0}
-
-        # 计算每种情感的加权匹配分数
-        emotion_scores = {}
-        matched_keywords = {}
-
-        for emotion, levels in emotion_keywords.items():
-            score = 0
-            matches = []
-            for level, keywords in levels.items():
-                weight = weight_map[level]
-                for keyword in keywords:
-                    if keyword in text_lower:
-                        score += weight
-                        matches.append(f"{keyword}({level})")
-            emotion_scores[emotion] = score
-            if matches:
-                matched_keywords[emotion] = matches
-
-        # 显示匹配的关键词（用于调试）
-        if matched_keywords:
-            print(f"[IndexTTS2] 🔍 匹配的情感关键词: {matched_keywords}")
-            print(f"[IndexTTS2] 🔍 Matched emotion keywords: {matched_keywords}")
-
-        # 如果没有匹配到任何关键词，返回中性情感
-        if sum(emotion_scores.values()) == 0:
-            return self.backup_dict.copy()
-
-        # 归一化分数
-        total_score = sum(emotion_scores.values())
-        normalized_scores = {}
-        for emotion, score in emotion_scores.items():
-            if total_score > 0:
-                normalized_scores[emotion] = min(self.max_score, (score / total_score) * 1.0)
-            else:
-                normalized_scores[emotion] = 0.0
-
-        # 确保至少有一个情感有分数
-        if sum(normalized_scores.values()) == 0:
-            normalized_scores["neutral"] = 0.8
-
-        return normalized_scores
-
+        
+        scores = {k: 0.0 for k in emotion_keywords.keys()}
+        scores["neutral"] = 1.0
+        found = False
+        for emo, words in emotion_keywords.items():
+            if emo == "neutral": continue
+            for w in words:
+                if w in text_lower:
+                    scores[emo] = 0.9
+                    scores["neutral"] = 0.0
+                    found = True
+                    break
+        
+        if found: scores["neutral"] = 0.0
+        return scores, found
 
 if __name__ == "__main__":
-    prompt_wav = "examples/voice_01.wav"
-    text = '欢迎大家来体验indextts2，并给予我们意见与反馈，谢谢大家。'
-
-    tts = IndexTTS2(cfg_path="checkpoints/config.yaml", model_dir="checkpoints", use_cuda_kernel=False)
-    tts.infer(spk_audio_prompt=prompt_wav, text=text, output_path="gen.wav", verbose=True)
+    pass
