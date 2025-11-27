@@ -7,12 +7,12 @@ pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --force-reinstall
 pip install torchcodec==0.2.0
 ```
 **Files to update:**  
-*indextts/infer_v2.py*
-*nodes/emotion_voice_multi_talk_node.py*
-*nodes/multi_talk_node.py*
-*nodes/basic_tts_node.py*
+*indextts/infer_v2.py*  
+*nodes/emotion_voice_multi_talk_node.py*  
+*nodes/multi_talk_node.py*  
+*nodes/basic_tts_node.py*  
 
----
+---  
 
 
 <div align="center">
