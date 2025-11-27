@@ -260,7 +260,8 @@ class IndexTTS2BasicNode:
                 top_p=0.9,        # 使用nucleus sampling
                 top_k=50,         # 限制候选token数量
                 max_text_tokens_per_sentence=120,  # 限制每句话的token数量
-                interval_silence=200  # 句子间的静音间隔(ms)
+                interval_silence=200,  # 句子间的静音间隔(ms)
+                speed=speed # <--- FIXED: Added speed parameter here
             )
 
             # 加载生成的音频
