@@ -520,6 +520,7 @@ class IndexTTS2EmotionVoiceMultiTalkNode:
 
                     try:
                         # 使用情绪语音控制
+                        # <--- FIXED: Added speed parameter here
                         model.infer(
                             spk_audio_prompt=speaker_audio_path,
                             text=text,
@@ -531,7 +532,8 @@ class IndexTTS2EmotionVoiceMultiTalkNode:
                             top_p=0.9,
                             top_k=50,
                             max_text_tokens_per_sentence=120,
-                            interval_silence=200
+                            interval_silence=200,
+                            speed=speed
                         )
                     finally:
                         # 清理情绪音频临时文件
@@ -541,6 +543,7 @@ class IndexTTS2EmotionVoiceMultiTalkNode:
                             pass
                 else:
                     # 基础合成（无情绪控制）
+                    # <--- FIXED: Added speed parameter here
                     model.infer(
                         spk_audio_prompt=speaker_audio_path,
                         text=text,
@@ -550,7 +553,8 @@ class IndexTTS2EmotionVoiceMultiTalkNode:
                         top_p=0.9,
                         top_k=50,
                         max_text_tokens_per_sentence=120,
-                        interval_silence=200
+                        interval_silence=200,
+                        speed=speed
                     )
 
                 # 加载生成的音频
