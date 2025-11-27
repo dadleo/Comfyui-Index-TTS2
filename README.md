@@ -1,4 +1,4 @@
-# Optimation for mps acceleration, speaker control, speed adjust enabled, 
+# Optimation for mps acceleration, speaker control, speed adjustment enabled, BigVGAN and Qwen crash fixed
 **Comfyui Runtime Environment:**
 ```bash
 pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --force-reinstall
