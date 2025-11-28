@@ -1160,12 +1160,12 @@ class IndexTTS2:
                 print(f"[IndexTTS2] Qwen Raw Output: {content}")
                 
                 # Lazy Check
-                if emo_dict.get("neutral", 0) > 0.6:
-                    print(f"[IndexTTS2] ⚠️  Model output Neutral > 0.6. Checking Keywords...")
-                    keyword_scores, found = self.qwen_emo._fallback_emotion_analysis(text)
-                    if found and keyword_scores.get("neutral", 1.0) < 0.5:
-                         print(f"[IndexTTS2] 🚀 Keywords Overrode Model: {keyword_scores}")
-                         emo_dict = keyword_scores
+                # if emo_dict.get("neutral", 0) > 0.6:
+                #    print(f"[IndexTTS2] ⚠️  Model output Neutral > 0.6. Checking Keywords...")
+                #    keyword_scores, found = self.qwen_emo._fallback_emotion_analysis(text)
+                #    if found and keyword_scores.get("neutral", 1.0) < 0.5:
+                #         print(f"[IndexTTS2] 🚀 Keywords Overrode Model: {keyword_scores}")
+                #         emo_dict = keyword_scores
                 
                 print(f"[IndexTTS2] Final Applied Emotion: {emo_dict}")
                 emo_vector = list(emo_dict.values())
@@ -1417,7 +1417,7 @@ class IndexTTS2:
                 dtype = None
                 with torch.amp.autocast(text_tokens.device.type, enabled=dtype is not None, dtype=dtype):
                     m_start_time = time.perf_counter()
-                    diffusion_steps = 25
+                    diffusion_steps = 10
                     inference_cfg_rate = 0.7
                     latent = self.s2mel.models['gpt_layer'](latent)
                     S_infer = self.semantic_codec.quantizer.vq2emb(codes.unsqueeze(1))
@@ -1437,7 +1437,7 @@ class IndexTTS2:
                     cat_condition = torch.cat([prompt_condition, cond], dim=1)
                     vc_target = self.s2mel.models['cfm'].inference(
                         cat_condition, torch.LongTensor([cat_condition.size(1)]).to(cond.device),
-                        ref_mel, style, None, 25, inference_cfg_rate=0.7
+                        ref_mel, style, None, 10, inference_cfg_rate=0.7
                     )
                     vc_target = vc_target[:, :, ref_mel.size(-1):]
 
@@ -1571,7 +1571,19 @@ class QwenEmotion:
             print(f"[IndexTTS2] ⚠️  Qwen load failed: {e}")
 
     def _initialize_default_attributes(self):
-        self.prompt = "文本情感分类"
+        # self.prompt = "文本情感分类"
+        self.prompt = (
+            "You are an expert Speech Prosody Analyst and Voice Director. "
+            "Your task is to determine the appropriate speaking tone for a TTS model based on the input text semantics.\n"
+            "CRITICAL RULE: Distinguish between 'Subject Matter' and 'Speaker Tone'.\n"
+            "1. Narrator/Broadcast/Analysis: If the text is reporting facts, analyzing politics, or storytelling, "
+            "the voice should remain 'Neutral', 'Calm', or 'Serious', even if the topic is negative (war, crime).\n"
+            "2. Character Dialogue/Expression: If the text is first-person dialogue with exclamation marks "
+            "or emotional outbursts, match the intense emotion (Angry, Happy, Fear, etc.).\n"
+            "3. Casual Conversation: Usually 'Neutral', 'Happy', or slight 'Surprise'.\n\n"
+            "Analyze the text structure and context. Output probabilities (0.0-1.0) for: "
+            "Happy, Angry, Sad, Fear, Hate, Low, Surprise, Neutral."
+        )
         self.cn_key_to_en = {
             "高兴": "happy", "愤怒": "angry", "悲伤": "sad", "恐惧": "afraid",
             "反感": "disgusted", "低落": "melancholic", "惊讶": "surprised", "自然": "calm",
@@ -1649,12 +1661,12 @@ class QwenEmotion:
             content_dict = self.convert(content)
             
             # --- FIX: Lazy Check ---
-            if content_dict.get("neutral", 0) > 0.6:
-                print(f"[IndexTTS2] ⚠️  Model output Neutral > 0.6. Checking Keywords...")
-                keyword_scores, found = self._fallback_emotion_analysis(text_input)
-                if found and keyword_scores.get("neutral", 1.0) < 0.5:
-                     print(f"[IndexTTS2] 🚀 Keywords Overrode Model: {keyword_scores}")
-                     content_dict = keyword_scores
+            # if content_dict.get("neutral", 0) > 0.6:
+            #     print(f"[IndexTTS2] ⚠️  Model output Neutral > 0.6. Checking Keywords...")
+            #     keyword_scores, found = self._fallback_emotion_analysis(text_input)
+            #     if found and keyword_scores.get("neutral", 1.0) < 0.5:
+            #          print(f"[IndexTTS2] 🚀 Keywords Overrode Model: {keyword_scores}")
+            #          content_dict = keyword_scores
 
             # Melancholy Fix
             text_input_lower = text_input.lower()
