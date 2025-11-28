@@ -357,6 +357,7 @@ class IndexTTS2MultiTalkNode:
             # 检查是否为单人模式
             if num_speakers_int == 1:
                 # 单人模式：纯语音克隆
+                # FIX: Passed ALL missing parameters to single speaker function
                 return self._synthesize_single_speaker(
                     conversation_text, speaker1_audio, speaker1_emotion_config,
                     output_filename, model_manager, language, speed, temperature,
@@ -378,7 +379,7 @@ class IndexTTS2MultiTalkNode:
                     raise ValueError("Speaker 4 audio is required for 4 speakers conversation")
                 speaker_audios.append(speaker4_audio)
 
-            # Extract Custom Speaker Names from Config
+            # --- FIX START: Extract Custom Speaker Names from Config ---
             emotion_inputs = [speaker1_emotion_config, speaker2_emotion_config, speaker3_emotion_config, speaker4_emotion_config]
             custom_speaker_names = []
             
@@ -393,6 +394,7 @@ class IndexTTS2MultiTalkNode:
                 
             if verbose:
                 print(f"[MultiTalk] Configured Speakers: {custom_speaker_names}")
+            # --- FIX END ---
 
             # 解析对话文本
             conversation_lines = self._parse_conversation(conversation_text, num_speakers_int, verbose, custom_speaker_names)
@@ -445,7 +447,7 @@ class IndexTTS2MultiTalkNode:
                 processed_language = language if language != "auto" else "zh"
 
                 # 执行单个片段的情感合成（带一致性控制）
-                # <--- FIXED: Added speed parameter here
+                # === FIX: ADDED SPEED PARAMETER HERE ===
                 emotion_analysis = self._synthesize_with_emotion(
                     model, text, speaker_audio_path, emotion_config,
                     temp_output, temperature, top_p, verbose, voice_consistency, 
@@ -571,8 +573,8 @@ class IndexTTS2MultiTalkNode:
         use_fp16: bool,
         use_cuda_kernel: bool,
         verbose: bool,
-        use_accel: bool = True,
-        use_torch_compile: bool = False
+        use_accel: bool = True, # FIX: Added arg
+        use_torch_compile: bool = False # FIX: Added arg
     ) -> Tuple[dict, str, str, str]:
         """
         单人模式合成
@@ -587,6 +589,7 @@ class IndexTTS2MultiTalkNode:
             if model_manager is not None:
                 model = model_manager
             else:
+                # FIX: Now arguments are available
                 model = self._load_default_model(use_fp16, use_cuda_kernel, use_accel, use_torch_compile)
 
             # 准备说话人音频
@@ -605,7 +608,7 @@ class IndexTTS2MultiTalkNode:
             processed_language = language if language != "auto" else "zh"
 
             # 合成音频
-            # <--- FIXED: Added speed parameter here
+            # === FIX: ADDED SPEED PARAMETER HERE ===
             emotion_analysis = self._synthesize_with_emotion(
                 model, text, speaker_audio_path, emotion_config, temp_output_path,
                 temperature, top_p, verbose, language=processed_language, speed=speed
@@ -784,7 +787,7 @@ class IndexTTS2MultiTalkNode:
         print(f"💾 Multi-talk conversation saved to: {output_path}")
         return output_path
 
-    # <--- FIXED: Added speed parameter here
+    # === FIX: ADDED SPEED PARAMETER HERE ===
     def _synthesize_with_emotion(self, model, text: str, speaker_audio_path: str,
                                 emotion_config: Dict, output_path: str,
                                 temperature: float, top_p: float, verbose: bool,
@@ -795,7 +798,7 @@ class IndexTTS2MultiTalkNode:
         consistency_temp = max(0.1, temperature / voice_consistency)
         consistency_top_p = min(0.99, top_p * voice_consistency)
 
-        # <--- FIXED: Added speed parameter to ALL model.infer calls below
+        # === FIX: PASSED SPEED TO ALL MODEL.INFER CALLS ===
         if emotion_mode == "none":
             model.infer(
                 spk_audio_prompt=speaker_audio_path,
@@ -805,9 +808,9 @@ class IndexTTS2MultiTalkNode:
                 temperature=consistency_temp,
                 top_p=consistency_top_p,
                 top_k=50,
-                max_text_tokens_per_sentence=120,
+                max_text_tokens_per_sentence=60,
                 interval_silence=200,
-                speed=speed 
+                speed=speed
             )
             return "No emotion control"
 
@@ -829,7 +832,7 @@ class IndexTTS2MultiTalkNode:
                             temperature=consistency_temp,
                             top_p=consistency_top_p,
                             top_k=50,
-                            max_text_tokens_per_sentence=120,
+                            max_text_tokens_per_sentence=60,
                             interval_silence=200,
                             speed=speed
                         )
@@ -858,7 +861,7 @@ class IndexTTS2MultiTalkNode:
                 temperature=consistency_temp,
                 top_p=consistency_top_p,
                 top_k=50,
-                max_text_tokens_per_sentence=120,
+                max_text_tokens_per_sentence=60,
                 interval_silence=200,
                 speed=speed
             )
@@ -880,7 +883,7 @@ class IndexTTS2MultiTalkNode:
                     temperature=consistency_temp,
                     top_p=consistency_top_p,
                     top_k=50,
-                    max_text_tokens_per_sentence=120,
+                    max_text_tokens_per_sentence=60,
                     interval_silence=200,
                     speed=speed
                 )
@@ -896,7 +899,7 @@ class IndexTTS2MultiTalkNode:
                     temperature=consistency_temp,
                     top_p=consistency_top_p,
                     top_k=50,
-                    max_text_tokens_per_sentence=120,
+                    max_text_tokens_per_sentence=60,
                     interval_silence=200,
                     speed=speed
                 )
